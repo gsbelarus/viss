@@ -7,13 +7,14 @@ import { Types } from "mongoose";
 
 import { ApiError, getErrorMessage } from "@/lib/api-utils";
 import type {
-  ActiveDownloadRecord,
   DownloadMetadataResponse,
   DownloadRecord,
   VideoProvider,
 } from "@/lib/downloads-shared";
 import { createLogEntry } from "@/lib/logs";
 import { connectToDatabase } from "@/lib/mongodb";
+import type { ActiveProcessRecord } from "@/lib/processes-shared";
+import { deleteVideoAnalysisArtifacts } from "@/lib/video-analysis";
 import {
   getYouTubeBasicInfo,
   getYouTubeDownloadResources,
@@ -25,6 +26,7 @@ import { Tag } from "@/models/tag";
 const DOWNLOAD_SCOPE = "downloads";
 const DOWNLOADS_DIRECTORY = path.join(process.cwd(), "storage", "downloads");
 const ACTIVE_STATUSES = ["queued", "downloading"] as const;
+const ACTIVE_ANALYSIS_STATUSES = ["queued", "analyzing"] as const;
 
 declare global {
   var __vissDownloadJobs: Map<string, Promise<void>> | undefined;
@@ -214,9 +216,16 @@ function serializeDownload(download: {
   bytesReceived: number;
   expectedSize: number | null;
   errorMessage: string | null;
+  analysisStatus: DownloadRecord["analysisStatus"];
+  analysisProgressPercent: number | null;
+  analysisStage: string | null;
+  analysisErrorMessage: string | null;
+  analyzed: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
+  const analysisStatus = download.analysisStatus ?? "not_started";
+
   const record: DownloadRecord = {
     id: download._id.toString(),
     provider: download.provider,
@@ -230,6 +239,11 @@ function serializeDownload(download: {
     bytesReceived: download.bytesReceived,
     expectedSize: download.expectedSize,
     errorMessage: download.errorMessage,
+    analysisStatus,
+    analysisProgressPercent: download.analysisProgressPercent ?? null,
+    analysisStage: download.analysisStage ?? null,
+    analysisErrorMessage: download.analysisErrorMessage ?? null,
+    analyzed: download.analyzed ? download.analyzed.toISOString() : null,
     createdAt: download.createdAt.toISOString(),
     updatedAt: download.updatedAt.toISOString(),
   };
@@ -269,6 +283,11 @@ async function fetchDownloadRecord(downloadId: string) {
     bytesReceived: download.bytesReceived,
     expectedSize: download.expectedSize,
     errorMessage: download.errorMessage,
+    analysisStatus: download.analysisStatus,
+    analysisProgressPercent: download.analysisProgressPercent,
+    analysisStage: download.analysisStage,
+    analysisErrorMessage: download.analysisErrorMessage,
+    analyzed: download.analyzed,
     createdAt: download.createdAt,
     updatedAt: download.updatedAt,
   });
@@ -477,43 +496,100 @@ export async function listDownloads() {
       bytesReceived: download.bytesReceived,
       expectedSize: download.expectedSize,
       errorMessage: download.errorMessage,
+      analysisStatus: download.analysisStatus,
+      analysisProgressPercent: download.analysisProgressPercent,
+      analysisStage: download.analysisStage,
+      analysisErrorMessage: download.analysisErrorMessage,
+      analyzed: download.analyzed,
       createdAt: download.createdAt,
       updatedAt: download.updatedAt,
     })
   );
 }
 
-export async function listActiveDownloads() {
+function formatProcessBytes(value: number | null) {
+  if (value === null || !Number.isFinite(value)) {
+    return "Calculating";
+  }
+
+  if (value < 1024) {
+    return `${value} B`;
+  }
+
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${size.toFixed(size >= 100 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+export async function listActiveProcesses() {
   await connectToDatabase();
 
   const downloads = await Download.find({
-    status: { $in: ACTIVE_STATUSES },
+    $or: [
+      { status: { $in: ACTIVE_STATUSES } },
+      { analysisStatus: { $in: ACTIVE_ANALYSIS_STATUSES } },
+    ],
   })
-    .sort({ createdAt: -1 })
-    .limit(5)
+    .sort({ updatedAt: -1 })
+    .limit(10)
     .exec();
 
-  return downloads.map((download) => {
-    const progressPercent =
-      download.expectedSize && download.expectedSize > 0
-        ? Math.min(
-          100,
-          Math.round((download.bytesReceived / download.expectedSize) * 100)
-        )
-        : null;
+  const jobs: ActiveProcessRecord[] = [];
 
-    const record: ActiveDownloadRecord = {
-      id: download._id.toString(),
-      provider: download.provider,
-      name: download.name,
-      status: download.status as ActiveDownloadRecord["status"],
-      bytesReceived: download.bytesReceived,
-      expectedSize: download.expectedSize,
-      progressPercent,
-    };
+  for (const download of downloads) {
+    const analysisStatus = download.analysisStatus ?? "not_started";
 
-    return record;
-  });
+    if (ACTIVE_STATUSES.includes(download.status as (typeof ACTIVE_STATUSES)[number])) {
+      const progressPercent =
+        download.expectedSize && download.expectedSize > 0
+          ? Math.min(
+            100,
+            Math.round((download.bytesReceived / download.expectedSize) * 100)
+          )
+          : null;
+
+      jobs.push({
+        id: download._id.toString(),
+        kind: "download",
+        name: download.name,
+        status: download.status === "queued" ? "queued" : "running",
+        progressPercent,
+        statusLabel: download.status === "queued" ? "Download queued" : "Downloading",
+        detailText: `${formatProcessBytes(download.bytesReceived)}${download.expectedSize ? ` / ${formatProcessBytes(download.expectedSize)}` : ""}`,
+      });
+    }
+
+    if (
+      ACTIVE_ANALYSIS_STATUSES.includes(
+        analysisStatus as (typeof ACTIVE_ANALYSIS_STATUSES)[number]
+      )
+    ) {
+      jobs.push({
+        id: download._id.toString(),
+        kind: "analysis",
+        name: download.name,
+        status: analysisStatus === "queued" ? "queued" : "running",
+        progressPercent: download.analysisProgressPercent ?? null,
+        statusLabel:
+          analysisStatus === "queued"
+            ? "Analysis queued"
+            : download.analysisStage || "Analyzing video",
+        detailText:
+          analysisStatus === "queued"
+            ? "Waiting for the analysis worker."
+            : "Video analysis pipeline",
+      });
+    }
+  }
+
+  return jobs;
 }
 
 export async function getDownloadMetadata(url: string) {
@@ -616,11 +692,23 @@ export async function deleteDownloads(ids: string[]) {
   const activeDownloads = downloads.filter((download) =>
     ACTIVE_STATUSES.includes(download.status as (typeof ACTIVE_STATUSES)[number])
   );
+  const activeAnalyses = downloads.filter((download) =>
+    ACTIVE_ANALYSIS_STATUSES.includes(
+      (download.analysisStatus ?? "not_started") as (typeof ACTIVE_ANALYSIS_STATUSES)[number]
+    )
+  );
 
   if (activeDownloads.length > 0) {
     throw new ApiError(
       409,
       "Active downloads cannot be deleted while they are still running."
+    );
+  }
+
+  if (activeAnalyses.length > 0) {
+    throw new ApiError(
+      409,
+      "Active analyses cannot be deleted while they are still running."
     );
   }
 
@@ -633,6 +721,8 @@ export async function deleteDownloads(ids: string[]) {
 
       await rm(localFilePath, { force: true }).catch(() => undefined);
     }
+
+    await deleteVideoAnalysisArtifacts(download._id.toString());
 
     await createLogEntry({
       scope: DOWNLOAD_SCOPE,

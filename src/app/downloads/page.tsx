@@ -18,6 +18,10 @@ import type {
   DownloadStatus,
   DownloadsListResponse,
 } from "@/lib/downloads-shared";
+import type {
+  DownloadAnalysisStatus,
+  StartVideoAnalysisResponse,
+} from "@/lib/video-analysis-shared";
 
 type ToastKind = "info" | "success" | "error";
 
@@ -129,6 +133,39 @@ function DeleteIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function AnalyzeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M10.5 4h3" strokeLinecap="round" />
+      <path d="M12 2.5v3" strokeLinecap="round" />
+      <path d="m17.8 15.8 2.7 2.7" strokeLinecap="round" />
+      <circle cx="10.5" cy="10.5" r="5.5" />
+      <path d="M10.5 8.1v2.7l1.8 1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+interface DownloadStateSnapshot {
+  downloadStatus: DownloadStatus;
+  analysisStatus: DownloadAnalysisStatus;
+}
+
+function getAnalyzeButtonTone(download: DownloadRecord) {
+  switch (download.analysisStatus) {
+    case "completed":
+      return "border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100";
+    case "partial":
+      return "border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100";
+    case "failed":
+      return "border border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100";
+    case "queued":
+    case "analyzing":
+      return "border border-amber-200 bg-amber-50 text-amber-800";
+    default:
+      return "border border-stone-900/10 bg-white text-stone-700 hover:border-stone-900/20 hover:bg-stone-50";
+  }
+}
+
 export default function DownloadsPage() {
   const [downloads, setDownloads] = useState<DownloadRecord[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -143,7 +180,8 @@ export default function DownloadsPage() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [isSubmitting, startSubmitting] = useTransition();
   const [isDeleting, startDeleting] = useTransition();
-  const previousStatusesRef = useRef<Record<string, DownloadStatus>>({});
+  const [isAnalyzing, startAnalyzing] = useTransition();
+  const previousStatusesRef = useRef<Record<string, DownloadStateSnapshot>>({});
   const hasLoadedOnceRef = useRef(false);
   const fieldEditsRef = useRef({
     name: false,
@@ -160,6 +198,18 @@ export default function DownloadsPage() {
     []
   );
 
+  const isAnalysisActive = useCallback(
+    (download: DownloadRecord) =>
+      download.analysisStatus === "queued" || download.analysisStatus === "analyzing",
+    []
+  );
+
+  const isAnalyzable = useCallback(
+    (download: DownloadRecord) =>
+      download.status === "completed" && Boolean(download.fileName) && !isAnalysisActive(download),
+    [isAnalysisActive]
+  );
+
   const pushToast = useCallback((kind: ToastKind, message: string) => {
     const id = crypto.randomUUID();
 
@@ -173,36 +223,69 @@ export default function DownloadsPage() {
   const updateStatusTransitions = useCallback((nextDownloads: DownloadRecord[]) => {
     if (!hasLoadedOnceRef.current) {
       previousStatusesRef.current = Object.fromEntries(
-        nextDownloads.map((download) => [download.id, download.status])
+        nextDownloads.map((download) => [
+          download.id,
+          {
+            downloadStatus: download.status,
+            analysisStatus: download.analysisStatus,
+          },
+        ])
       );
       hasLoadedOnceRef.current = true;
       return;
     }
 
     for (const download of nextDownloads) {
-      const previousStatus = previousStatusesRef.current[download.id];
+      const previousState = previousStatusesRef.current[download.id];
 
-      if (!previousStatus || previousStatus === download.status) {
-        continue;
+      if (previousState && previousState.downloadStatus !== download.status) {
+        if (download.status === "completed") {
+          pushToast(
+            "success",
+            `${download.name || "Video"} downloaded successfully.`
+          );
+        }
+
+        if (download.status === "failed") {
+          pushToast(
+            "error",
+            download.errorMessage || `${download.name || "Video"} failed to download.`
+          );
+        }
       }
 
-      if (download.status === "completed") {
-        pushToast(
-          "success",
-          `${download.name || "Video"} downloaded successfully.`
-        );
-      }
+      if (previousState && previousState.analysisStatus !== download.analysisStatus) {
+        if (download.analysisStatus === "completed") {
+          pushToast(
+            "success",
+            `${download.name || "Video"} analyzed successfully.`
+          );
+        }
 
-      if (download.status === "failed") {
-        pushToast(
-          "error",
-          download.errorMessage || `${download.name || "Video"} failed to download.`
-        );
+        if (download.analysisStatus === "partial") {
+          pushToast(
+            "success",
+            `${download.name || "Video"} analysis completed with warnings.`
+          );
+        }
+
+        if (download.analysisStatus === "failed") {
+          pushToast(
+            "error",
+            download.analysisErrorMessage || `${download.name || "Video"} analysis failed.`
+          );
+        }
       }
     }
 
     previousStatusesRef.current = Object.fromEntries(
-      nextDownloads.map((download) => [download.id, download.status])
+      nextDownloads.map((download) => [
+        download.id,
+        {
+          downloadStatus: download.status,
+          analysisStatus: download.analysisStatus,
+        },
+      ])
     );
   }, [pushToast]);
 
@@ -450,6 +533,39 @@ export default function DownloadsPage() {
     });
   }
 
+  function handleAnalyze(download: DownloadRecord) {
+    if (!isAnalyzable(download)) {
+      return;
+    }
+
+    startAnalyzing(async () => {
+      try {
+        const response = await fetch("/api/analyses", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ id: download.id }),
+        });
+        const payload = (await response.json()) as StartVideoAnalysisResponse & {
+          error?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.error || "Failed to start video analysis.");
+        }
+
+        pushToast("info", payload.message || "Video analysis started.");
+        await loadDownloads(false);
+      } catch (error) {
+        pushToast(
+          "error",
+          getRequestError(error, "Failed to start video analysis.")
+        );
+      }
+    });
+  }
+
   return (
     <>
       <div className="space-y-4">
@@ -605,6 +721,22 @@ export default function DownloadsPage() {
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
+                            onClick={() => handleAnalyze(download)}
+                            disabled={!isAnalyzable(download) || isAnalyzing}
+                            aria-label={`${download.analysisStatus === "completed" || download.analysisStatus === "partial" ? "Re-run analysis for" : "Analyze"} ${download.name || "download"}`}
+                            title={
+                              download.analysisStatus === "completed" || download.analysisStatus === "partial"
+                                ? "Re-run analysis"
+                                : download.analysisStatus === "queued" || download.analysisStatus === "analyzing"
+                                  ? "Analysis running"
+                                  : "Analyze"
+                            }
+                            className={`inline-flex size-8 items-center justify-center transition disabled:cursor-not-allowed disabled:opacity-50 ${getAnalyzeButtonTone(download)}`}
+                          >
+                            <AnalyzeIcon className="size-4" aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => openPreview(download)}
                             disabled={!isPlayable(download)}
                             aria-label={`Play ${download.name || "downloaded video"}`}
@@ -616,7 +748,7 @@ export default function DownloadsPage() {
                           <button
                             type="button"
                             onClick={() => handleRowDelete(download)}
-                            disabled={isDeleting}
+                            disabled={isDeleting || isAnalysisActive(download)}
                             aria-label={`Delete ${download.name || "download"}`}
                             title="Delete"
                             className="inline-flex size-8 items-center justify-center border border-rose-200 bg-rose-50 text-rose-800 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"

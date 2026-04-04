@@ -1,5 +1,7 @@
 export type VideoProvider = "youtube";
 
+import type { DownloadAnalysisStatus } from "@/lib/video-analysis-shared";
+
 export type DownloadStatus =
   | "queued"
   | "downloading"
@@ -24,6 +26,11 @@ export interface DownloadRecord {
   bytesReceived: number;
   expectedSize: number | null;
   errorMessage: string | null;
+  analysisStatus: DownloadAnalysisStatus;
+  analysisProgressPercent: number | null;
+  analysisStage: string | null;
+  analysisErrorMessage: string | null;
+  analyzed: string | null;
   createdAt: string;
   updatedAt: string;
 }

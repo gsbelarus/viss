@@ -1,14 +1,14 @@
 import { createErrorResponse } from "@/lib/api-utils";
-import { listActiveDownloads } from "@/lib/downloads";
-import type { ActiveDownloadsResponse } from "@/lib/downloads-shared";
+import { listActiveProcesses } from "@/lib/downloads";
+import type { ActiveProcessesResponse } from "@/lib/processes-shared";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const jobs = await listActiveDownloads();
-    const response: ActiveDownloadsResponse = { jobs };
+    const jobs = await listActiveProcesses();
+    const response: ActiveProcessesResponse = { jobs };
 
     return Response.json(response);
   } catch (error) {
