@@ -18,6 +18,7 @@ import { deleteVideoAnalysisArtifacts } from "@/lib/video-analysis";
 import {
   getYouTubeBasicInfo,
   getYouTubeDownloadResources,
+  getYouTubePublishedAt,
   getYouTubeVideoId,
 } from "@/lib/youtube";
 import { Download } from "@/models/download";
@@ -71,6 +72,30 @@ function cleanTagName(value: string) {
   return normalizeWhitespace(value).slice(0, 80);
 }
 
+function parsePublishedTimestamp(value: string | null | undefined) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  const normalizedValue = normalizeWhitespace(value);
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const parsedValue = new Date(normalizedValue);
+
+  if (Number.isNaN(parsedValue.getTime())) {
+    throw new ApiError(400, "Published timestamp is invalid.");
+  }
+
+  return parsedValue;
+}
+
 function normalizeTagName(value: string) {
   return cleanTagName(value).toLowerCase();
 }
@@ -102,6 +127,10 @@ function extractSuggestedTags(info: YouTubeBasicInfo) {
       .filter(Boolean)
       .slice(0, 8)
   );
+}
+
+function resolvePublishedAt(info: YouTubeBasicInfo) {
+  return getYouTubePublishedAt(info);
 }
 
 function sanitizeFileStem(value: string) {
@@ -209,6 +238,7 @@ function serializeDownload(download: {
   url: string;
   fileName: string | null;
   size: number | null;
+  published: Date | null;
   downloaded: Date | null;
   name: string | null;
   tags: Array<Types.ObjectId | PopulatedTag>;
@@ -232,6 +262,7 @@ function serializeDownload(download: {
     url: download.url,
     fileName: download.fileName,
     size: download.size,
+    published: download.published ? download.published.toISOString() : null,
     downloaded: download.downloaded ? download.downloaded.toISOString() : null,
     name: download.name,
     tags: serializeTags(download.tags),
@@ -276,6 +307,7 @@ async function fetchDownloadRecord(downloadId: string) {
     url: download.url,
     fileName: download.fileName,
     size: download.size,
+    published: download.published,
     downloaded: download.downloaded,
     name: download.name,
     tags: download.tags as Array<Types.ObjectId | PopulatedTag>,
@@ -306,6 +338,7 @@ async function tryGetYouTubeMetadata(url: string) {
     return {
       provider: "youtube" as const,
       name: normalizeWhitespace(info.basic_info.title ?? ""),
+      published: resolvePublishedAt(info),
       tags: extractSuggestedTags(info),
     };
   } catch {
@@ -346,6 +379,7 @@ async function runQueuedDownload(downloadId: string) {
     const { videoId } = assertSupportedProvider(download.url);
     const info = await getYouTubeBasicInfo(videoId);
     const metadataName = normalizeWhitespace(info.basic_info.title ?? "");
+    const metadataPublished = resolvePublishedAt(info);
     const metadataTags = extractSuggestedTags(info);
     const resolvedName = download.name?.trim() || metadataName || null;
     const resolvedTagIds =
@@ -363,6 +397,7 @@ async function runQueuedDownload(downloadId: string) {
     download.name = resolvedName;
     download.tags = resolvedTagIds;
     download.fileName = fileName;
+    download.published = metadataPublished ?? download.published;
     download.status = "downloading";
     download.bytesReceived = 0;
     download.expectedSize = expectedSize;
@@ -489,6 +524,7 @@ export async function listDownloads() {
       url: download.url,
       fileName: download.fileName,
       size: download.size,
+      published: download.published,
       downloaded: download.downloaded,
       name: download.name,
       tags: download.tags as Array<Types.ObjectId | PopulatedTag>,
@@ -648,6 +684,7 @@ export async function enqueueDownload(input: {
     status: "queued",
     fileName: null,
     size: null,
+    published: metadata?.published ?? null,
     downloaded: null,
     bytesReceived: 0,
     expectedSize: null,
@@ -670,6 +707,38 @@ export async function enqueueDownload(input: {
   startQueuedDownload(download._id.toString());
 
   return fetchDownloadRecord(download._id.toString());
+}
+
+export async function updateDownload(
+  downloadId: string,
+  input: {
+    tagNames?: string[];
+    published?: string | null;
+  }
+) {
+  await connectToDatabase();
+
+  if (!Types.ObjectId.isValid(downloadId)) {
+    throw new ApiError(400, "Invalid download id.");
+  }
+
+  const download = await Download.findById(downloadId).exec();
+
+  if (!download) {
+    throw new ApiError(404, "Download record was not found.");
+  }
+
+  if (input.tagNames) {
+    download.tags = await resolveTagIds(input.tagNames);
+  }
+
+  if ("published" in input) {
+    download.published = parsePublishedTimestamp(input.published) ?? null;
+  }
+
+  await download.save();
+
+  return fetchDownloadRecord(downloadId);
 }
 
 export async function deleteDownloads(ids: string[]) {

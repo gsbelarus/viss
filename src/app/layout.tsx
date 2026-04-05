@@ -29,7 +29,7 @@ export default function RootLayout({
       lang="en"
       className={`${spaceGrotesk.variable} ${ibmPlexMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full font-sans">
+      <body className="h-full overflow-hidden font-sans">
         <AppShell>{children}</AppShell>
       </body>
     </html>

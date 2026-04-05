@@ -40,8 +40,8 @@ const activityItems = [
 
 export default function Home() {
   return (
-    <div className="grid flex-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(18rem,0.85fr)]">
-      <div className="space-y-4">
+    <div className="grid h-full min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(18rem,0.85fr)]">
+      <div className="flex min-h-0 flex-col gap-4">
         <section className="border border-stone-900/8 bg-[rgba(255,252,247,0.92)] p-5 shadow-[0_12px_30px_rgba(28,25,23,0.05)] sm:p-6">
           <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
             Overview
@@ -73,7 +73,7 @@ export default function Home() {
           ))}
         </section>
 
-        <section className="border border-stone-900/8 bg-[rgba(255,252,247,0.92)] shadow-[0_12px_30px_rgba(28,25,23,0.05)]">
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-stone-900/8 bg-[rgba(255,252,247,0.92)] shadow-[0_12px_30px_rgba(28,25,23,0.05)]">
           <div className="flex items-center justify-between gap-4 border-b border-stone-900/8 px-5 py-4">
             <div>
               <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
@@ -88,7 +88,7 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="min-h-0 flex-1 overflow-auto">
             <table className="min-w-full border-collapse text-left">
               <thead>
                 <tr className="border-b border-stone-900/8 bg-stone-950/[0.02]">

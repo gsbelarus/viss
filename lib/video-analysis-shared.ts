@@ -61,6 +61,9 @@ export interface TranscriptSegmentRecord {
   startSec: number;
   endSec: number;
   text: string;
+  avgLogprob: number | null;
+  compressionRatio: number | null;
+  noSpeechProb: number | null;
 }
 
 export interface TranscriptRecord {
@@ -68,7 +71,11 @@ export interface TranscriptRecord {
   provider: "openai";
   language: string | null;
   text: string | null;
+  rawText: string | null;
   segments: TranscriptSegmentRecord[];
+  audibleSpeechLikely: boolean;
+  confidence: number | null;
+  suppressionReason: string | null;
   error: string | null;
 }
 
@@ -119,6 +126,16 @@ export interface AudioEnergyPointRecord {
   startSec: number;
   endSec: number;
   rms: number;
+  zeroCrossingRate: number;
+}
+
+export type AudioTransitionKind = "energy_change" | "silence_break" | "texture_change";
+
+export interface AudioTransitionRecord {
+  timestampSec: number;
+  kind: AudioTransitionKind;
+  strength: number;
+  detail: string;
 }
 
 export interface SilenceRegionRecord {
@@ -135,6 +152,7 @@ export interface AudioHeuristicsRecord {
   avgRmsEnergy: number;
   peakRmsEnergy: number;
   energyTimeline: AudioEnergyPointRecord[];
+  transitionSignals: AudioTransitionRecord[];
   silenceRegions: SilenceRegionRecord[];
   dynamicProfile: DynamicProfile;
   notes: string[];
@@ -150,6 +168,8 @@ export interface FrameAnalysisRecord {
   environment: string | null;
   cameraFraming: string | null;
   emotionalTone: string | null;
+  facialExpression: string | null;
+  visualDevices: string[];
   visibleTextSummary: string | null;
   storyRole: StoryRole;
   observedFacts: string[];
@@ -170,6 +190,15 @@ export interface ConfidenceRecord {
   scenarioConfidence: number;
 }
 
+export type NarrativeCueType = "audio" | "expression" | "visual_device" | "text" | "scene";
+
+export interface NarrativeCueRecord {
+  timestampSec: number;
+  cueType: NarrativeCueType;
+  observation: string;
+  interpretation: string | null;
+}
+
 export interface AnalysisNarrativeStructureRecord {
   hook: string | null;
   setup: string | null;
@@ -182,6 +211,7 @@ export interface AnalysisNarrativeStructureRecord {
 export interface AnalysisRecord {
   status: VideoAnalysisStatus;
   summary: string | null;
+  mainIdea: string | null;
   language: string | null;
   contentCategory: string | null;
   narrativeStructure: AnalysisNarrativeStructureRecord;
@@ -192,6 +222,8 @@ export interface AnalysisRecord {
   onScreenTextRole: string | null;
   probableScript: string | null;
   sceneBySceneReconstruction: SceneReconstructionRecord[];
+  techniques: string[];
+  narrativeCues: NarrativeCueRecord[];
   observedFacts: string[];
   inferredElements: string[];
   uncertainElements: string[];
@@ -221,6 +253,7 @@ export interface EmbeddingsRecord {
 export interface VideoAnalysisDocumentData {
   videoId: string;
   downloadId: string | null;
+  verified: boolean;
   filePath: string;
   sourceUrl: string | null;
   platform: string | null;
@@ -245,6 +278,55 @@ export interface VideoAnalysisDocumentData {
   updatedAt?: string;
 }
 
+export interface VideoAnalysisListRecord {
+  id: string;
+  videoId: string;
+  downloadId: string | null;
+  verified: boolean;
+  name: string | null;
+  fileName: string | null;
+  published: string | null;
+  platform: string | null;
+  sourceUrl: string | null;
+  status: VideoAnalysisStatus;
+  contentCategory: string | null;
+  summary: string | null;
+  durationSec: number;
+  analyzedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface VideoAnalysisDetailRecord extends VideoAnalysisDocumentData {
+  id: string;
+  name: string | null;
+  fileName: string | null;
+  published: string | null;
+}
+
 export interface StartVideoAnalysisResponse {
+  message: string;
+}
+
+export interface StartVideoAnalysisConflictResponse {
+  error: string;
+  requiresOverwrite: true;
+}
+
+export interface VideoAnalysesListResponse {
+  analyses: VideoAnalysisListRecord[];
+}
+
+export interface VideoAnalysisDetailResponse {
+  analysis: VideoAnalysisDetailRecord;
+}
+
+export interface VideoAnalysisDeleteResponse {
+  deletedId: string;
+  message: string;
+}
+
+export interface VideoAnalysisUpdateResponse {
+  analysis: VideoAnalysisDetailRecord;
   message: string;
 }

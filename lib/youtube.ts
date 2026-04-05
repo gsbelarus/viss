@@ -86,6 +86,52 @@ export async function getYouTubeBasicInfo(videoId: string) {
   return client.getBasicInfo(videoId);
 }
 
+function parseYouTubeDate(value: unknown) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalizedValue = value.trim();
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const candidate = /^\d{4}-\d{2}-\d{2}$/.test(normalizedValue)
+    ? `${normalizedValue}T00:00:00.000Z`
+    : normalizedValue;
+  const parsedValue = new Date(candidate);
+
+  return Number.isNaN(parsedValue.getTime()) ? null : parsedValue;
+}
+
+export function getYouTubePublishedAt(info: Awaited<ReturnType<typeof getYouTubeBasicInfo>>) {
+  const playerResponse = info.page[0];
+  const microformat = playerResponse?.microformat;
+
+  if (!microformat || typeof microformat !== "object") {
+    return info.basic_info.start_timestamp ?? null;
+  }
+
+  const metadata = microformat as {
+    publish_date?: unknown;
+    upload_date?: unknown;
+    start_timestamp?: unknown;
+  };
+
+  return (
+    parseYouTubeDate(metadata.publish_date) ??
+    parseYouTubeDate(metadata.upload_date) ??
+    parseYouTubeDate(metadata.start_timestamp) ??
+    info.basic_info.start_timestamp ??
+    null
+  );
+}
+
 export async function getYouTubeDownloadResources(videoId: string) {
   const client = await getYouTubeClient();
   const format = await client.getStreamingData(videoId, YOUTUBE_DOWNLOAD_OPTIONS);

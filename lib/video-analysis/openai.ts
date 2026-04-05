@@ -63,8 +63,27 @@ interface SceneSliceInput {
 
 interface FinalSynthesisInput {
   mediaMetadata: MediaMetadataRecord;
-  transcript: TranscriptRecord;
+  transcript: {
+    status: TranscriptRecord["status"];
+    language: string | null;
+    text: string | null;
+    segments: Array<{
+      startSec: number;
+      endSec: number;
+      text: string;
+    }>;
+    audibleSpeechLikely: boolean;
+    confidence: number | null;
+    suppressionReason: string | null;
+  };
   ocrSummary: string | null;
+  storyHypotheses: string[];
+  cueTimeline: Array<{
+    timestampSec: number;
+    cueType: "audio" | "expression" | "visual_device" | "text" | "scene";
+    observation: string;
+    interpretationHint?: string | null;
+  }>;
   frameAnalyses: FrameAnalysisRecord[];
   sceneCandidates: SceneCandidateRecord[];
   audioHeuristics: AudioHeuristicsRecord;
@@ -72,6 +91,7 @@ interface FinalSynthesisInput {
 
 interface FinalSynthesisPayload {
   summary: string | null;
+  mainIdea: string | null;
   language: string | null;
   contentCategory: string | null;
   narrativeStructure: AnalysisRecord["narrativeStructure"];
@@ -82,6 +102,8 @@ interface FinalSynthesisPayload {
   onScreenTextRole: string | null;
   probableScript: string | null;
   sceneBySceneReconstruction: SceneReconstructionRecord[];
+  techniques: string[];
+  narrativeCues: AnalysisRecord["narrativeCues"];
   observedFacts: string[];
   inferredElements: string[];
   uncertainElements: string[];
@@ -112,6 +134,8 @@ const FRAME_ANALYSIS_SCHEMA = {
     "environment",
     "cameraFraming",
     "emotionalTone",
+    "facialExpression",
+    "visualDevices",
     "visibleTextSummary",
     "storyRole",
     "observedFacts",
@@ -135,6 +159,11 @@ const FRAME_ANALYSIS_SCHEMA = {
     environment: { type: ["string", "null"] },
     cameraFraming: { type: ["string", "null"] },
     emotionalTone: { type: ["string", "null"] },
+    facialExpression: { type: ["string", "null"] },
+    visualDevices: {
+      type: "array",
+      items: { type: "string" },
+    },
     visibleTextSummary: { type: ["string", "null"] },
     storyRole: {
       type: "string",
@@ -186,6 +215,7 @@ const FINAL_SYNTHESIS_SCHEMA = {
   additionalProperties: false,
   required: [
     "summary",
+    "mainIdea",
     "language",
     "contentCategory",
     "narrativeStructure",
@@ -196,6 +226,8 @@ const FINAL_SYNTHESIS_SCHEMA = {
     "onScreenTextRole",
     "probableScript",
     "sceneBySceneReconstruction",
+    "techniques",
+    "narrativeCues",
     "observedFacts",
     "inferredElements",
     "uncertainElements",
@@ -203,6 +235,7 @@ const FINAL_SYNTHESIS_SCHEMA = {
   ],
   properties: {
     summary: { type: ["string", "null"] },
+    mainIdea: { type: ["string", "null"] },
     language: { type: ["string", "null"] },
     contentCategory: { type: ["string", "null"] },
     narrativeStructure: {
@@ -234,6 +267,27 @@ const FINAL_SYNTHESIS_SCHEMA = {
           startSec: { type: "number" },
           endSec: { type: "number" },
           description: { type: "string" },
+        },
+      },
+    },
+    techniques: {
+      type: "array",
+      items: { type: "string" },
+    },
+    narrativeCues: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["timestampSec", "cueType", "observation", "interpretation"],
+        properties: {
+          timestampSec: { type: "number" },
+          cueType: {
+            type: "string",
+            enum: ["audio", "expression", "visual_device", "text", "scene"],
+          },
+          observation: { type: "string" },
+          interpretation: { type: ["string", "null"] },
         },
       },
     },
@@ -397,12 +451,39 @@ function parseFrameAnalysis(rawText: string) {
     environment: asNullableString(value.environment, "environment"),
     cameraFraming: asNullableString(value.cameraFraming, "cameraFraming"),
     emotionalTone: asNullableString(value.emotionalTone, "emotionalTone"),
+    facialExpression: asNullableString(value.facialExpression, "facialExpression"),
+    visualDevices: asStringArray(value.visualDevices, "visualDevices"),
     visibleTextSummary: asNullableString(value.visibleTextSummary, "visibleTextSummary"),
     storyRole: asStoryRole(value.storyRole, "storyRole"),
     observedFacts: asStringArray(value.observedFacts, "observedFacts"),
     inferences: asStringArray(value.inferences, "inferences"),
     uncertainties: asStringArray(value.uncertainties, "uncertainties"),
   };
+}
+
+function parseNarrativeCues(value: unknown, label: string): AnalysisRecord["narrativeCues"] {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be an array.`);
+  }
+
+  return value.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw new Error(`${label}[${index}] must be an object.`);
+    }
+
+    const cueType = asString(entry.cueType, `${label}[${index}].cueType`) as AnalysisRecord["narrativeCues"][number]["cueType"];
+
+    if (!["audio", "expression", "visual_device", "text", "scene"].includes(cueType)) {
+      throw new Error(`${label}[${index}].cueType must be supported.`);
+    }
+
+    return {
+      timestampSec: asNumber(entry.timestampSec, `${label}[${index}].timestampSec`),
+      cueType,
+      observation: asString(entry.observation, `${label}[${index}].observation`),
+      interpretation: asNullableString(entry.interpretation, `${label}[${index}].interpretation`),
+    };
+  });
 }
 
 function parseOcrBoxes(value: unknown, label: string): OcrFrameRecord["boxes"] {
@@ -480,6 +561,7 @@ function parseFinalSynthesis(rawText: string): FinalSynthesisPayload {
 
   return {
     summary: asNullableString(value.summary, "summary"),
+    mainIdea: asNullableString(value.mainIdea, "mainIdea"),
     language: asNullableString(value.language, "language"),
     contentCategory: asNullableString(value.contentCategory, "contentCategory"),
     narrativeStructure: {
@@ -506,6 +588,8 @@ function parseFinalSynthesis(rawText: string): FinalSynthesisPayload {
       value.sceneBySceneReconstruction,
       "sceneBySceneReconstruction"
     ),
+    techniques: asStringArray(value.techniques, "techniques"),
+    narrativeCues: parseNarrativeCues(value.narrativeCues, "narrativeCues"),
     observedFacts: asStringArray(value.observedFacts, "observedFacts"),
     inferredElements: asStringArray(value.inferredElements, "inferredElements"),
     uncertainElements: asStringArray(value.uncertainElements, "uncertainElements"),
@@ -624,6 +708,12 @@ export async function transcribeAudioWithOpenAI(
       startSec: typeof segment.start === "number" ? segment.start : 0,
       endSec: typeof segment.end === "number" ? segment.end : 0,
       text: typeof segment.text === "string" ? segment.text.trim() : "",
+      avgLogprob:
+        typeof segment.avg_logprob === "number" ? segment.avg_logprob : null,
+      compressionRatio:
+        typeof segment.compression_ratio === "number" ? segment.compression_ratio : null,
+      noSpeechProb:
+        typeof segment.no_speech_prob === "number" ? segment.no_speech_prob : null,
     }))
     : [];
 
@@ -658,6 +748,9 @@ export async function analyzeFrameWithOpenAI(
       "Analyze the provided frame and return JSON only.",
       "Separate observed facts from inferences.",
       "Do not invent events not visible in the frame.",
+      "If a face is visible, capture the dominant reaction beat using face and body language together when needed.",
+      "Prefer specific reactions such as puzzled surprise, dawning realization, playful delight, smug satisfaction, boredom, or resignation over vague labels like engaged when the image supports them.",
+      "List deliberate visual devices or stylization cues such as face warp, distortion, exaggeration, filters, or comedic edits when visible. Use an empty array when none are apparent.",
       "If visible text exists, summarize it separately.",
       "Classify the frame's likely story role using one of: hook, setup, development, reveal, payoff, cta, unknown.",
     ].join(" "),
@@ -753,8 +846,22 @@ export async function synthesizeVideoWithOpenAI(
     logger,
     instructions: [
       "You are a grounded short-video analysis engine.",
-      "You are given transcript of spoken audio, OCR text found on screen, frame-by-frame visual descriptions with timestamps, scene-change timing information, audio heuristics including energy and music-presence estimates, and basic video metadata.",
-      "Your task is to reconstruct the likely scenario and structure of the video.",
+      "You are given transcript of spoken audio, OCR text found on screen, frame-by-frame visual descriptions with timestamps, scene-change timing information, audio heuristics including energy, texture-change, and music-presence estimates, a chronological cue timeline, and basic video metadata.",
+      "Your task is to reconstruct the likely scenario, the main idea or punchline, and the reusable creative techniques of the video.",
+      "Treat transcript.text as the only reliable spoken-dialogue field. If transcript.text is null, transcript.status is skipped, or transcript.confidence is low, assume there is no dependable audible speech and do not invent spoken words.",
+      "If storyHypotheses are present, treat them as high-priority structured summaries derived from repeated evidence. Use the strongest supported hypothesis to drive summary, mainIdea, and twistOrReveal instead of flattening the video into a generic montage.",
+      "If OCR or frame text shows ordered labels such as ages, years, levels, or before/after states, use them as explicit structure and compare the corresponding settings, reactions, and audio cues.",
+      "If repeated early labels frame examples as normal and a later label singles out one beat differently, treat that relabeling as an intentional escalation or punchline.",
+      "Pay special attention to contrast structures where later beats reinterpret earlier ones, such as before-versus-after, carefree-versus-burdened, innocence-versus-understanding, or setup-versus-payoff.",
+      "When a late stage clearly contrasts with earlier leisure/play stages and moves into school, work, responsibility, or another burdened context, favor that contrast as the main reveal instead of flattening the video into a generic montage.",
+      "When the evidence supports a transition from carefree play to school, responsibility, or loss of innocence, the mainIdea must explicitly name that transition.",
+      "Use timed cue combinations across text, facial expressions, visual devices, and audio transitions to infer the intended meaning when multiple channels align.",
+      "If a cue includes an interpretationHint, treat it as a deterministic pattern summary and use it when it matches the rest of the evidence.",
+      "When repeated distortion, exaggeration, or stylization appears during one phase of the video, infer its likely narrative function if the surrounding evidence supports that reading instead of leaving it generically uncertain.",
+      "The mainIdea field must capture the single clearest premise, joke, or takeaway in one sentence.",
+      "The techniques array must list reusable storytelling or editing techniques so similar videos can be found later.",
+      "The narrativeCues array must cite the most important timed cues that support your interpretation, with an interpretation for each cue when possible.",
+      "The probableScript field should reconstruct the intended beat-by-beat message, not just literal spoken words.",
       "Rules: Return valid JSON only. Distinguish observed facts from inferences. Spoken text and on-screen text are separate channels and must not be merged unless clearly aligned. Audio heuristics are supporting evidence, not certainty. Do not claim certainty where evidence is weak. Prefer concise, structured, production-usable output.",
     ].join(" "),
     buildInput: (repairText) => [
