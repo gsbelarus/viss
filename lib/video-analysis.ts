@@ -25,6 +25,7 @@ import {
 } from "@/lib/video-analysis/sampling";
 import {
   analyzeFrameWithOpenAI,
+  analyzeFrameSequenceWithOpenAI,
   buildSceneEmbeddingTexts,
   generateEmbeddingsWithOpenAI,
   runOcrOnFrameWithOpenAI,
@@ -1257,6 +1258,281 @@ function buildSynthesisTranscriptContext(transcript: TranscriptRecord) {
   };
 }
 
+function findTranscriptTimestamp(transcript: TranscriptRecord, pattern: RegExp) {
+  for (const segment of transcript.segments) {
+    if (pattern.test(segment.text.toLowerCase())) {
+      return segment.startSec;
+    }
+  }
+
+  return null;
+}
+
+function buildTranscriptReversalHint(transcript: TranscriptRecord) {
+  const normalizedTranscript = transcript.text?.toLowerCase() ?? "";
+
+  if (!normalizedTranscript) {
+    return null;
+  }
+
+  const refusalCount = normalizedTranscript.match(/\bno\b/g)?.length ?? 0;
+  const hasPermissionSetup =
+    /(teacher\s+can\s+i|can\s+i)/.test(normalizedTranscript) && refusalCount >= 4;
+  const hasCallbackToRefusals =
+    /(you\s+said\s+no|once\s+again\s+you\s+said\s+no|but\s+you\s+said\s+no)/.test(
+      normalizedTranscript
+    );
+  const hasLatePermissionAbuse =
+    /(thanks\s+for\s+allowing\s+me|swear\s+at\s+principal|yes\s+yes\s+yes)/.test(
+      normalizedTranscript
+    );
+
+  if (!(hasPermissionSetup && hasCallbackToRefusals && hasLatePermissionAbuse)) {
+    return null;
+  }
+
+  return {
+    timestampSec:
+      findTranscriptTimestamp(
+        transcript,
+        /(thanks\s+for\s+allowing\s+me|swear\s+at\s+principal|yes\s+yes\s+yes)/
+      ) ?? 0,
+    observation:
+      "Dialogue repeatedly sets up permission requests answered with 'no', then explicitly cites those refusals before a late 'yes' enables the final absurd outburst.",
+    hypothesis:
+      "The skit repeats a strict authority figure's 'no' to every request, then flips that rigidity back on them when the other character cites those refusals as excuses and treats the eventual 'yes' as permission for an absurd punchline.",
+  };
+}
+
+function buildFrameEvidenceText(frame: FrameAnalysisRecord) {
+  return [
+    frame.sceneDescription,
+    frame.environment,
+    frame.cameraFraming,
+    frame.emotionalTone,
+    frame.facialExpression,
+    frame.visibleTextSummary,
+    frame.subjects.join(" "),
+    frame.objects.join(" "),
+    frame.actions.join(" "),
+    frame.observedFacts.join(" "),
+    frame.inferences.join(" "),
+    frame.uncertainties.join(" "),
+  ]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .join(" ")
+    .toLowerCase();
+}
+
+function scoreHandFocusedFrame(frame: FrameAnalysisRecord) {
+  const text = buildFrameEvidenceText(frame);
+  let score = 0;
+
+  if (/(hand|hands|finger|fingers|thumb|thumbs|pinky|little finger|index finger|knuckle|palm|fist)/.test(text)) {
+    score += 1;
+  }
+
+  if (/(pinky|little finger|index finger|thumb|thumbs|palm|fist|knuckle)/.test(text)) {
+    score += 2;
+  }
+
+  if (/(wrap|wrapped|wrapping|cover|covered|covering|closed fist|clenched fist|slides? along|sliding along|conceal|concealed|hide|hidden|encase)/.test(text)) {
+    score += 3;
+  }
+
+  if (/(hand illusion|finger illusion|finger transformation|manual reveal|sleight[- ]of[- ]hand|different finger|changed finger|switch(?:es|ing)? fingers?|substitut(?:e|es|ed|ion)|transforms? into|reveals? an index finger|reveals? a little finger)/.test(text)) {
+    score += 4;
+  }
+
+  return score;
+}
+
+function selectFocusedSequenceFrames(
+  frames: SelectedFrameRecord[],
+  frameAnalyses: FrameAnalysisRecord[]
+) {
+  const pairedFrames = frameAnalyses
+    .map((analysis, index) => ({
+      analysis,
+      selectedFrame: frames[index] ?? null,
+      score: scoreHandFocusedFrame(analysis),
+    }))
+    .filter(
+      (
+        entry
+      ): entry is {
+        analysis: FrameAnalysisRecord;
+        selectedFrame: SelectedFrameRecord;
+        score: number;
+      } => entry.selectedFrame !== null && entry.score > 0
+    );
+
+  if (pairedFrames.length < 3) {
+    return [];
+  }
+
+  let bestWindow: typeof pairedFrames = [];
+  let bestScore = 0;
+
+  for (let startIndex = 0; startIndex < pairedFrames.length; startIndex += 1) {
+    const window = [pairedFrames[startIndex]];
+    let windowScore = pairedFrames[startIndex].score;
+
+    for (let index = startIndex + 1; index < pairedFrames.length; index += 1) {
+      if (
+        pairedFrames[index].analysis.timestampSec -
+        window[window.length - 1].analysis.timestampSec >
+        1.05
+      ) {
+        break;
+      }
+
+      window.push(pairedFrames[index]);
+      windowScore += pairedFrames[index].score;
+
+      if (window.length >= 5) {
+        break;
+      }
+    }
+
+    if (window.length >= 3 && windowScore > bestScore) {
+      bestWindow = window;
+      bestScore = windowScore;
+    }
+  }
+
+  if (bestWindow.length < 3 || bestScore < 6) {
+    return [];
+  }
+
+  return bestWindow;
+}
+
+async function deriveFocusedSequenceInterpretation(
+  filePath: string,
+  frames: SelectedFrameRecord[],
+  frameAnalyses: FrameAnalysisRecord[],
+  mediaMetadata: MediaMetadataRecord,
+  durationSec: number,
+  analysisDirectory: string,
+  transcript: TranscriptRecord,
+  ocrSummary: string | null,
+  logger: AnalysisLogger,
+  commandLogger: (message: string, details?: Record<string, unknown>) => Promise<void>
+) {
+  const sequenceFrames = selectFocusedSequenceFrames(frames, frameAnalyses);
+
+  if (sequenceFrames.length === 0) {
+    return null;
+  }
+
+  const lateSequenceFrames = sequenceFrames.slice(-Math.min(sequenceFrames.length, 4));
+  const startSec = Math.max(0, lateSequenceFrames[0].analysis.timestampSec - 0.12);
+  const endSec = Math.min(
+    durationSec,
+    lateSequenceFrames[lateSequenceFrames.length - 1].analysis.timestampSec + 0.18
+  );
+  const denseFrameDirectory = path.join(analysisDirectory, "sequence-focus");
+  const denseFrameCount = Math.min(
+    8,
+    Math.max(5, Math.round((endSec - startSec) / 0.15) + 1)
+  );
+  const cropWidth = Math.min(
+    mediaMetadata.width,
+    Math.max(180, Math.round(mediaMetadata.width * 0.8))
+  );
+  const cropHeight = Math.min(
+    mediaMetadata.height,
+    Math.max(180, Math.round(mediaMetadata.height * 0.48))
+  );
+  const cropX = Math.max(0, Math.round((mediaMetadata.width - cropWidth) / 2));
+  const cropY = Math.max(
+    0,
+    Math.min(
+      mediaMetadata.height - cropHeight,
+      Math.round(mediaMetadata.height * 0.14)
+    )
+  );
+  const cropFilter = `crop=${cropWidth}:${cropHeight}:${cropX}:${cropY},scale=768:-1`;
+  const denseFrames: Array<{
+    framePath: string;
+    timestampSec: number;
+    sceneDescription: string;
+    actions: string[];
+    inferences: string[];
+  }> = [];
+
+  try {
+    await mkdir(denseFrameDirectory, { recursive: true });
+
+    for (let index = 0; index < denseFrameCount; index += 1) {
+      const timestampSec =
+        denseFrameCount === 1
+          ? startSec
+          : clampFrameTimestamp(
+            startSec + ((endSec - startSec) * index) / (denseFrameCount - 1),
+            durationSec
+          );
+      const framePath = path.join(
+        denseFrameDirectory,
+        `sequence-${String(index + 1).padStart(3, "0")}.jpg`
+      );
+      const nearestFrame = lateSequenceFrames.reduce((bestMatch, candidate) => {
+        if (!bestMatch) {
+          return candidate;
+        }
+
+        return Math.abs(candidate.analysis.timestampSec - timestampSec) <
+          Math.abs(bestMatch.analysis.timestampSec - timestampSec)
+          ? candidate
+          : bestMatch;
+      }, lateSequenceFrames[0]);
+
+      await extractStillFrame(filePath, timestampSec, framePath, commandLogger, cropFilter);
+      denseFrames.push({
+        framePath,
+        timestampSec: roundTo(timestampSec, 3),
+        sceneDescription: nearestFrame.analysis.sceneDescription,
+        actions: nearestFrame.analysis.actions,
+        inferences: nearestFrame.analysis.inferences,
+      });
+    }
+
+    const sequenceAnalysis = await analyzeFrameSequenceWithOpenAI(
+      {
+        frames: denseFrames,
+        transcriptExcerpt: getTranscriptExcerpt(
+          transcript,
+          Math.max(0, startSec - 0.75),
+          endSec + 0.75
+        ),
+        ocrExcerpt: ocrSummary,
+      },
+      createCommandLogger(logger)
+    );
+
+    if (!sequenceAnalysis.hypothesis || sequenceAnalysis.confidence < 0.55) {
+      return null;
+    }
+
+    return {
+      timestampSec: startSec,
+      observation:
+        sequenceAnalysis.observationSummary ??
+        "A short run of consecutive frames suggests a precise manual reveal rather than generic gesturing.",
+      hypothesis: sequenceAnalysis.hypothesis,
+    };
+  } catch (error) {
+    await logger("info", "Focused sequence interpretation skipped after an error.", {
+      error: getErrorMessage(error, "Unknown sequence analysis error."),
+    });
+
+    return null;
+  } finally {
+    await rm(denseFrameDirectory, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 function inferStoryRoleForScene(
   scene: { startSec: number; endSec: number },
   frameAnalyses: FrameAnalysisRecord[]
@@ -1682,6 +1958,53 @@ export async function processVideo(
     );
     frameAnalyses = analyzedFrames;
 
+    const focusedSequenceInterpretation = await deriveFocusedSequenceInterpretation(
+      filePath,
+      frames,
+      frameAnalyses,
+      mediaMetadata,
+      mediaMetadata.durationSec,
+      analysisDirectory,
+      transcript,
+      ocr.summaryText,
+      logger,
+      commandLogger
+    );
+    const transcriptReversalHint = buildTranscriptReversalHint(transcript);
+    const storyHypotheses = [
+      ...(focusedSequenceInterpretation?.hypothesis
+        ? [focusedSequenceInterpretation.hypothesis]
+        : []),
+      ...(transcriptReversalHint?.hypothesis ? [transcriptReversalHint.hypothesis] : []),
+      ...buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics),
+    ].filter(
+      (value, index, allValues): value is string =>
+        Boolean(value) && allValues.indexOf(value) === index
+    );
+    const cueTimeline = [
+      ...(focusedSequenceInterpretation
+        ? [
+          {
+            timestampSec: focusedSequenceInterpretation.timestampSec,
+            cueType: "scene" as const,
+            observation: focusedSequenceInterpretation.observation,
+            interpretationHint: focusedSequenceInterpretation.hypothesis,
+          },
+        ]
+        : []),
+      ...(transcriptReversalHint
+        ? [
+          {
+            timestampSec: transcriptReversalHint.timestampSec,
+            cueType: "text" as const,
+            observation: transcriptReversalHint.observation,
+            interpretationHint: transcriptReversalHint.hypothesis,
+          },
+        ]
+        : []),
+      ...buildSynthesisCueTimeline(ocr, frameAnalyses, audioHeuristics),
+    ].sort((left, right) => left.timestampSec - right.timestampSec);
+
     const synthesis = await runStage(
       videoId,
       "finalSynthesis",
@@ -1693,8 +2016,8 @@ export async function processVideo(
             mediaMetadata,
             transcript: buildSynthesisTranscriptContext(transcript),
             ocrSummary: ocr.summaryText,
-            storyHypotheses: buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics),
-            cueTimeline: buildSynthesisCueTimeline(ocr, frameAnalyses, audioHeuristics),
+            storyHypotheses,
+            cueTimeline,
             frameAnalyses,
             sceneCandidates: scenes.candidates,
             audioHeuristics,

@@ -415,3 +415,181 @@ test("fast reflex labels can signal a final prank reversal instead of a generic 
     )
   );
 });
+
+test("manual finger transformation cues surface a hand-illusion punchline", () => {
+  const ocr: OcrRecord = {
+    status: "completed",
+    detected: false,
+    summaryText: null,
+    frames: [],
+    error: null,
+  };
+
+  const frameAnalyses: FrameAnalysisRecord[] = [
+    {
+      timestampSec: 0.5,
+      sceneDescription:
+        "A woman starts a close-up hand trick by presenting a single little finger toward the camera while another person watches.",
+      subjects: ["woman", "man"],
+      objects: ["hands"],
+      actions: ["showing a little finger", "setting up a hand illusion"],
+      environment: "indoor room",
+      cameraFraming: "medium close-up with hands foregrounded",
+      emotionalTone: "teasing confidence",
+      facialExpression: "knowing smirk",
+      visualDevices: [],
+      visibleTextSummary: null,
+      storyRole: "setup",
+      observedFacts: [
+        "One little finger is isolated and held toward the camera.",
+        "The hands are the center of attention.",
+      ],
+      inferences: ["The video begins a step-by-step hand illusion."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 1.4,
+      sceneDescription:
+        "She wraps the other hand into a fist around the extended finger and slides it along the knuckles.",
+      subjects: ["woman"],
+      objects: ["hands", "fist"],
+      actions: ["wrapping a fist around the finger", "sliding the fist along the knuckles"],
+      environment: "indoor room",
+      cameraFraming: "close-up on hands",
+      emotionalTone: "focused setup",
+      facialExpression: "concentrated calm",
+      visualDevices: [],
+      visibleTextSummary: null,
+      storyRole: "development",
+      observedFacts: ["One hand covers the finger inside a fist."],
+      inferences: ["The concealment suggests a sleight-of-hand setup."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 2.2,
+      sceneDescription:
+        "She opens the fist to reveal an index finger where the little finger was expected, and the man reacts in shock.",
+      subjects: ["woman", "man"],
+      objects: ["hands", "index finger"],
+      actions: ["opening the fist", "revealing a different finger", "reacting in surprise"],
+      environment: "indoor room",
+      cameraFraming: "close-up on hands and reactions",
+      emotionalTone: "comic reveal",
+      facialExpression: "wide-eyed astonishment",
+      visualDevices: [],
+      visibleTextSummary: null,
+      storyRole: "reveal",
+      observedFacts: [
+        "A different finger is visible after the hand opens.",
+        "The nearby man stares with a shocked expression.",
+      ],
+      inferences: ["The punchline is a finger transformation reveal."],
+      uncertainties: [],
+    },
+  ];
+
+  const audioHeuristics: AudioHeuristicsRecord = {
+    status: "completed",
+    audioPresent: true,
+    speechPresentLikely: false,
+    musicPresentLikely: true,
+    musicPresenceConfidence: 0.66,
+    avgRmsEnergy: 0.03,
+    peakRmsEnergy: 0.08,
+    energyTimeline: [],
+    transitionSignals: [],
+    silenceRegions: [],
+    dynamicProfile: "moderate",
+    notes: [],
+    error: null,
+  };
+
+  const cues = buildSynthesisCueTimeline(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    cues.some(
+      (cue) =>
+        cue.observation.includes("covered-finger setup") &&
+        cue.interpretationHint?.includes("hand-illusion joke")
+    )
+  );
+
+  const hypotheses = buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    hypotheses.some(
+      (hypothesis) =>
+        hypothesis.includes("manual finger illusion") &&
+        hypothesis.includes("different finger has appeared")
+    )
+  );
+});
+
+test("generic hand posing does not trigger the hand-illusion hypothesis", () => {
+  const ocr: OcrRecord = {
+    status: "completed",
+    detected: false,
+    summaryText: null,
+    frames: [],
+    error: null,
+  };
+
+  const frameAnalyses: FrameAnalysisRecord[] = [
+    {
+      timestampSec: 0.4,
+      sceneDescription: "A woman gives a thumbs-up beside her smiling friend.",
+      subjects: ["woman", "friend"],
+      objects: ["hands"],
+      actions: ["giving a thumbs-up"],
+      environment: "living room",
+      cameraFraming: "medium shot",
+      emotionalTone: "playful",
+      facialExpression: "smiling delight",
+      visualDevices: [],
+      visibleTextSummary: null,
+      storyRole: "setup",
+      observedFacts: ["One thumb is raised."],
+      inferences: ["The pose reads as approval."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 1.2,
+      sceneDescription: "She points toward a phone while still posing for the camera.",
+      subjects: ["woman"],
+      objects: ["phone", "hands"],
+      actions: ["pointing at a phone", "posing"],
+      environment: "living room",
+      cameraFraming: "medium shot",
+      emotionalTone: "casual",
+      facialExpression: "soft smile",
+      visualDevices: [],
+      visibleTextSummary: null,
+      storyRole: "development",
+      observedFacts: ["A phone is visible in the scene."],
+      inferences: ["The gesture highlights the phone."],
+      uncertainties: [],
+    },
+  ];
+
+  const audioHeuristics: AudioHeuristicsRecord = {
+    status: "completed",
+    audioPresent: true,
+    speechPresentLikely: false,
+    musicPresentLikely: true,
+    musicPresenceConfidence: 0.5,
+    avgRmsEnergy: 0.02,
+    peakRmsEnergy: 0.05,
+    energyTimeline: [],
+    transitionSignals: [],
+    silenceRegions: [],
+    dynamicProfile: "calm",
+    notes: [],
+    error: null,
+  };
+
+  const hypotheses = buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    hypotheses.every((hypothesis) => !hypothesis.includes("manual finger illusion"))
+  );
+});

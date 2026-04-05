@@ -97,6 +97,26 @@ function buildFrameText(frame: FrameAnalysisRecord) {
     .toLowerCase();
 }
 
+function buildFrameEvidenceText(frame: FrameAnalysisRecord) {
+  return [
+    frame.sceneDescription,
+    frame.environment,
+    frame.cameraFraming,
+    frame.emotionalTone,
+    frame.facialExpression,
+    frame.visibleTextSummary,
+    frame.subjects.join(" "),
+    frame.objects.join(" "),
+    frame.actions.join(" "),
+    frame.observedFacts.join(" "),
+    frame.inferences.join(" "),
+    frame.uncertainties.join(" "),
+  ]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .join(" ")
+    .toLowerCase();
+}
+
 function buildCombinedFrameText(
   frameAnalyses: FrameAnalysisRecord[],
   minimumTimestampSec = Number.NEGATIVE_INFINITY
@@ -374,6 +394,82 @@ function buildTextEscalationCue(
   } satisfies SynthesisCueInput;
 }
 
+function buildManualTransformationCue(frameAnalyses: FrameAnalysisRecord[]) {
+  const orderedFrames = [...frameAnalyses].sort((left, right) => left.timestampSec - right.timestampSec);
+  const handFocusedFrames = orderedFrames
+    .map((frame) => ({
+      frame,
+      text: buildFrameEvidenceText(frame),
+    }))
+    .filter(({ text }) =>
+      /(hand|hands|finger|fingers|thumb|thumbs|pinky|little finger|index finger|knuckle|knuckles|palm|fist)/.test(
+        text
+      )
+    );
+
+  if (handFocusedFrames.length < 2) {
+    return null;
+  }
+
+  const concealmentFrames = handFocusedFrames.filter(({ text }) =>
+    /(wrap|wrapped|wrapping|cover|covered|covering|closed fist|clenched fist|fist around|clasp|grip|slides? along|sliding along|conceal|concealed|hide|hidden|encase)/.test(
+      text
+    )
+  );
+  const revealFrames = handFocusedFrames.filter(({ text }) => {
+    if (
+      /(hand illusion|finger illusion|finger transformation|manual transformation|sleight[- ]of[- ]hand|different finger|changed finger|switch(?:es|ing)? fingers?|substitut(?:e|es|ed|ion)|transforms? into)/.test(
+        text
+      )
+    ) {
+      return true;
+    }
+
+    return (
+      /(index finger|little finger|pinky)/.test(text) &&
+      /(reveal|reveals|revealed|illusion|transformation|switch|becomes|become|different|unexpected)/.test(
+        text
+      )
+    );
+  });
+
+  if (concealmentFrames.length === 0 || revealFrames.length === 0) {
+    return null;
+  }
+
+  const firstConcealmentTimestampSec = concealmentFrames[0].frame.timestampSec;
+  const revealFrame =
+    revealFrames.find(({ frame }) => frame.timestampSec >= firstConcealmentTimestampSec) ??
+    revealFrames[0];
+
+  if (revealFrame.frame.timestampSec < firstConcealmentTimestampSec) {
+    return null;
+  }
+
+  const surprisedReaction = orderedFrames
+    .map((frame) => ({
+      frame,
+      text: buildFrameEvidenceText(frame),
+    }))
+    .find(
+      ({ frame, text }) =>
+        frame.timestampSec >= revealFrame.frame.timestampSec &&
+        /(surpris|shock|astonish|wide-eyed|jaw-drop|amazed|stunned|gasp|wow|confused surprise)/.test(
+          text
+        )
+    );
+
+  return {
+    timestampSec: roundTo(revealFrame.frame.timestampSec, 3),
+    cueType: "scene" as const,
+    observation: surprisedReaction
+      ? "Close-up hand positions progress from a covered-finger setup into a different-finger reveal, followed by a surprised reaction beat."
+      : "Close-up hand positions progress from a covered-finger setup into a different-finger reveal.",
+    interpretationHint:
+      "This points to a hand-illusion joke: the performer stages a manual finger transformation or substitution reveal rather than generic posing, dancing, or team-play acting.",
+  } satisfies SynthesisCueInput;
+}
+
 export function buildAudioTransitionSignals(
   windows: AudioHeuristicsRecord["energyTimeline"],
   silenceThreshold: number
@@ -531,6 +627,7 @@ export function buildSynthesisCueTimeline(
     buildRepeatedVisualDeviceCue(frameAnalyses),
     buildAlignedAudioPivotCue(frameAnalyses, audioHeuristics),
     buildTextEscalationCue(ocr.frames, frameAnalyses),
+    buildManualTransformationCue(frameAnalyses),
     ...buildOcrTimelineCues(ocr.frames),
     ...buildFrameSignalCues(frameAnalyses),
     ...audioHeuristics.transitionSignals.map((signal) => ({
@@ -577,6 +674,7 @@ export function buildStoryHypotheses(
   const repeatedVisualDeviceCue = buildRepeatedVisualDeviceCue(frameAnalyses);
   const alignedAudioPivotCue = buildAlignedAudioPivotCue(frameAnalyses, audioHeuristics);
   const textEscalationCue = buildTextEscalationCue(ocr.frames, frameAnalyses);
+  const manualTransformationCue = buildManualTransformationCue(frameAnalyses);
 
   if (phaseContrastCue?.interpretationHint?.includes("carefree childhood gives way to school life")) {
     hypotheses.push(
@@ -584,6 +682,12 @@ export function buildStoryHypotheses(
     );
   } else if (phaseContrastCue?.interpretationHint) {
     hypotheses.push(phaseContrastCue.interpretationHint);
+  }
+
+  if (manualTransformationCue?.interpretationHint) {
+    hypotheses.push(
+      "The clip centers on a manual finger illusion: one hand covers or slides over a finger, then the reveal makes it look like a different finger has appeared as the punchline."
+    );
   }
 
   if (repeatedVisualDeviceCue?.interpretationHint) {

@@ -29,7 +29,7 @@ const navigationItems = [
   {
     href: "/scripts",
     label: "Scripts",
-    description: "Transcript and playbook output",
+    description: "Drafts and generation output",
   },
   {
     href: "/diagnostics",
@@ -58,6 +58,14 @@ function getPageTitle(pathname: string) {
 
   if (pathname.startsWith("/analysis/")) {
     return "Analysis Details";
+  }
+
+  if (pathname === "/scripts/new") {
+    return "New Script";
+  }
+
+  if (pathname.startsWith("/scripts/")) {
+    return "Script Details";
   }
 
   const segments = pathname.split("/").filter(Boolean);
@@ -213,7 +221,9 @@ export default function AppShell({ children }: AppShellProps) {
 
           <nav aria-label="Primary" className="mt-5 flex flex-1 flex-col gap-2">
             {navigationItems.map((item) => {
-              const isActive = pathname === item.href;
+              const isActive =
+                pathname === item.href ||
+                (item.href !== "/" && pathname.startsWith(`${item.href}/`));
 
               return (
                 <Link

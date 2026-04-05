@@ -40,6 +40,18 @@ interface FrameAnalysisInput {
   ocrExcerpt: string | null;
 }
 
+interface FrameSequenceInput {
+  frames: Array<{
+    framePath: string;
+    timestampSec: number;
+    sceneDescription: string;
+    actions: string[];
+    inferences: string[];
+  }>;
+  transcriptExcerpt: string | null;
+  ocrExcerpt: string | null;
+}
+
 interface OcrInput {
   framePath: string;
   timestampSec: number;
@@ -50,6 +62,12 @@ interface OcrFramePayload {
   text: string | null;
   confidence: number | null;
   boxes: OcrFrameRecord["boxes"];
+}
+
+interface FrameSequencePayload {
+  observationSummary: string | null;
+  hypothesis: string | null;
+  confidence: number;
 }
 
 interface SceneSliceInput {
@@ -207,6 +225,17 @@ const OCR_FRAME_SCHEMA = {
         },
       },
     },
+  },
+} as const;
+
+const FRAME_SEQUENCE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["observationSummary", "hypothesis", "confidence"],
+  properties: {
+    observationSummary: { type: ["string", "null"] },
+    hypothesis: { type: ["string", "null"] },
+    confidence: { type: "number" },
   },
 } as const;
 
@@ -530,6 +559,16 @@ function parseOcrFrame(rawText: string): OcrFramePayload {
   };
 }
 
+function parseFrameSequence(rawText: string): FrameSequencePayload {
+  const value = parseJsonObject(rawText);
+
+  return {
+    observationSummary: asNullableString(value.observationSummary, "observationSummary"),
+    hypothesis: asNullableString(value.hypothesis, "hypothesis"),
+    confidence: clampConfidence(asNumber(value.confidence, "confidence")),
+  };
+}
+
 function parseSceneReconstruction(value: unknown, label: string) {
   if (!Array.isArray(value)) {
     throw new Error(`${label} must be an array.`);
@@ -750,6 +789,9 @@ export async function analyzeFrameWithOpenAI(
       "Do not invent events not visible in the frame.",
       "If a face is visible, capture the dominant reaction beat using face and body language together when needed.",
       "Prefer specific reactions such as puzzled surprise, dawning realization, playful delight, smug satisfaction, boredom, or resignation over vague labels like engaged when the image supports them.",
+      "Treat hands, fingers, and object states as first-class evidence when they are foregrounded. If the frame centers on hands, describe the exact finger configuration, which hand is covering or wrapping the other, and any before/after state that could signal a hand trick, illusion, or transformation reveal.",
+      "If the image suggests a step-by-step hand trick or sleight-of-hand, say so explicitly in inferences using direct terms such as hand illusion, finger transformation, manual reveal, or sleight-of-hand instead of generic labels like gesture or pose.",
+      "Do not flatten precise hand or finger choreography into generic dance moves, posing, or team rivalry just because clothing, music, or staging has a performance vibe.",
       "List deliberate visual devices or stylization cues such as face warp, distortion, exaggeration, filters, or comedic edits when visible. Use an empty array when none are apparent.",
       "If visible text exists, summarize it separately.",
       "Classify the frame's likely story role using one of: hook, setup, development, reveal, payoff, cta, unknown.",
@@ -834,6 +876,66 @@ export async function runOcrOnFrameWithOpenAI(
   });
 }
 
+export async function analyzeFrameSequenceWithOpenAI(
+  input: FrameSequenceInput,
+  logger?: OpenAILogger
+) {
+  return requestStructuredJson({
+    model: DEFAULT_FRAME_ANALYSIS_MODEL,
+    schemaName: "frame_sequence_analysis",
+    schema: FRAME_SEQUENCE_SCHEMA,
+    requestLabel: "frame sequence analysis",
+    logger,
+    instructions: [
+      "You are comparing consecutive frames from the same short video.",
+      "Analyze the sequence as a progression rather than as unrelated stills.",
+      "Focus on exact changes in hands, fingers, fists, palm orientation, coverings, and object state across frames.",
+      "If one finger appears to be covered, guided, or replaced so that a different finger seems to appear on reveal, call that out directly even when the exact named fingers are slightly ambiguous.",
+      "When a sequence starts with one isolated finger or thumb-based shape and ends with a different finger extension, prefer describing it as one finger seeming to turn into another or a finger-substitution reveal, not merely as a new pose.",
+      "If the motion looks like a hand puzzle or visual illusion, hypothesis should explicitly mention the apparent finger change or substitution.",
+      "If the sequence shows a deliberate manual trick, finger substitution, sleight-of-hand, or transformation reveal, state that explicitly in hypothesis.",
+      "Do not reduce a sequence to clever gestures when the visual progression suggests a before-and-after hand trick or illusion.",
+      "If the sequence is only ordinary posing, dancing, or generic gesturing, return hypothesis null.",
+      "Do not let clothing theme or background vibe override the actual hand or object progression.",
+      "Return JSON only.",
+    ].join(" "),
+    buildInput: (repairText) => [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: [
+              "Frames are ordered chronologically.",
+              input.frames
+                .map(
+                  (frame, index) =>
+                    `Frame ${index + 1} @ ${frame.timestampSec.toFixed(2)}s\nScene: ${frame.sceneDescription}\nActions: ${frame.actions.join(", ") || "none"}\nInferences so far: ${frame.inferences.join(", ") || "none"}`
+                )
+                .join("\n\n"),
+              input.transcriptExcerpt
+                ? `Nearby spoken transcript:\n${input.transcriptExcerpt}`
+                : "Nearby spoken transcript: none available.",
+              input.ocrExcerpt
+                ? `Nearby on-screen text context:\n${input.ocrExcerpt}`
+                : "Nearby on-screen text context: none available.",
+              repairText ? `Previous invalid JSON output:\n${repairText}` : null,
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          },
+          ...input.frames.map((frame) => ({
+            type: "input_image" as const,
+            detail: "high" as const,
+            image_url: frameToDataUrl(frame.framePath),
+          })),
+        ],
+      },
+    ],
+    validate: parseFrameSequence,
+  });
+}
+
 export async function synthesizeVideoWithOpenAI(
   input: FinalSynthesisInput,
   logger?: OpenAILogger
@@ -855,6 +957,8 @@ export async function synthesizeVideoWithOpenAI(
       "If repeated early labels frame examples as normal and a later label singles out one beat differently, treat that relabeling as an intentional escalation or punchline.",
       "When repeated labels present other people as reaction-test examples and a later label singles out one person, consider whether the final beat is the exception who reverses or defeats the earlier prank or challenge rather than just another skill demo.",
       "Pay special attention to contrast structures where later beats reinterpret earlier ones, such as before-versus-after, carefree-versus-burdened, innocence-versus-understanding, or setup-versus-payoff.",
+      "When consecutive frames focus on hands or fingers and later frames reveal a changed finger or object state after concealment, treat that as the core trick or joke rather than as generic gesturing.",
+      "If the visual action is a precise hand or finger illusion, do not flatten it into generic dancing, posing, cheer-team rivalry, or fashion/performance vibes based only on clothing or music.",
       "When a late stage clearly contrasts with earlier leisure/play stages and moves into school, work, responsibility, or another burdened context, favor that contrast as the main reveal instead of flattening the video into a generic montage.",
       "When the evidence supports a transition from carefree play to school, responsibility, or loss of innocence, the mainIdea must explicitly name that transition.",
       "Use timed cue combinations across text, facial expressions, visual devices, and audio transitions to infer the intended meaning when multiple channels align.",

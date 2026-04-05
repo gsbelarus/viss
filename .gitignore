@@ -25,6 +25,9 @@
 .DS_Store
 *.pem
 /tmp/regression-output.json
+/tmp/inspect-*/
+/tmp/verify*.txt
+/tmp/verified*.txt
 
 # debug
 npm-debug.log*

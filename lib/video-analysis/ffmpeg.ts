@@ -198,7 +198,8 @@ export async function extractStillFrame(
   filePath: string,
   timestampSec: number,
   outputPath: string,
-  logger?: CommandLogger
+  logger?: CommandLogger,
+  videoFilter?: string
 ) {
   const args = [
     "-loglevel",
@@ -212,8 +213,13 @@ export async function extractStillFrame(
     "1",
     "-q:v",
     "2",
-    outputPath,
   ];
+
+  if (videoFilter) {
+    args.push("-vf", videoFilter);
+  }
+
+  args.push(outputPath);
 
   await runCommand("ffmpeg", args, logger);
 

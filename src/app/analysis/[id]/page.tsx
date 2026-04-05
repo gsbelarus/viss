@@ -8,6 +8,7 @@ import {
   formatLocalizedDateTime,
   getPreferredLocaleFromAcceptLanguage,
 } from "@/lib/date-time";
+import CopyDownloadIdButton from "./copy-download-id-button";
 import ReanalyzeButton from "./reanalyze-button";
 import VerifiedToggle from "./verified-toggle";
 import type {
@@ -209,6 +210,17 @@ export default async function AnalysisDetailPage({
               <span>{formatDuration(analysis.mediaMetadata.durationSec)}</span>
               <span>{formatBytes(analysis.mediaMetadata.fileSizeBytes)}</span>
               <span>{analysis.analysis.contentCategory || "Uncategorized"}</span>
+              {analysis.downloadId ? (
+                <span className="inline-flex items-center gap-2">
+                  <span>
+                    Download ID:
+                  </span>
+                  <span className="font-mono text-[0.74rem] text-stone-600">{analysis.downloadId}</span>
+                  <CopyDownloadIdButton downloadId={analysis.downloadId} />
+                </span>
+              ) : (
+                <span>Download ID unavailable</span>
+              )}
             </div>
           </div>
           <div className="w-full max-w-sm space-y-3 lg:w-auto">
