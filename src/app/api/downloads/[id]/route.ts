@@ -22,8 +22,12 @@ interface DownloadRouteContext {
 }
 
 function parseTagNames(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+
   if (!Array.isArray(value)) {
-    return [] as string[];
+    throw new ApiError(400, "Tags must be an array.");
   }
 
   return value
@@ -54,10 +58,20 @@ export async function PATCH(
   try {
     const { id } = await params;
     const body = await readJsonBody<UpdateDownloadRequestBody>(request);
-    const download = await updateDownload(toNonEmptyString(id), {
-      tagNames: parseTagNames(body.tags),
-      published: parsePublished(body.published),
-    });
+    const updateInput: {
+      tagNames?: string[];
+      published?: string | null;
+    } = {};
+
+    if (body.tags !== undefined) {
+      updateInput.tagNames = parseTagNames(body.tags);
+    }
+
+    if (body.published !== undefined) {
+      updateInput.published = parsePublished(body.published);
+    }
+
+    const download = await updateDownload(toNonEmptyString(id), updateInput);
     const response: DownloadUpdateResponse = {
       download,
       message: "Download updated.",

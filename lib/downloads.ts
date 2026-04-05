@@ -728,11 +728,11 @@ export async function updateDownload(
     throw new ApiError(404, "Download record was not found.");
   }
 
-  if (input.tagNames) {
+  if (input.tagNames !== undefined) {
     download.tags = await resolveTagIds(input.tagNames);
   }
 
-  if ("published" in input) {
+  if (input.published !== undefined) {
     download.published = parsePublishedTimestamp(input.published) ?? null;
   }
 
