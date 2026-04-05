@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { Types } from "mongoose";
@@ -7,7 +7,7 @@ import { ApiError, toNonEmptyString } from "@/lib/api-utils";
 import { deleteDownloads } from "@/lib/downloads";
 import { createLogEntry } from "@/lib/logs";
 import { connectToDatabase } from "@/lib/mongodb";
-import { deleteVideoAnalysisArtifacts } from "@/lib/video-analysis";
+import { deleteVideoAnalysisArtifacts, processVideo } from "@/lib/video-analysis";
 import type {
   VideoAnalysisDetailRecord,
   VideoAnalysisListRecord,
@@ -110,6 +110,58 @@ async function loadDownloadMap(downloadIds: string[]) {
   );
 }
 
+function buildStoredDownloadFilePath(fileName: string) {
+  return path.join(
+    /*turbopackIgnore: true*/ process.cwd(),
+    "storage",
+    "downloads",
+    path.basename(fileName)
+  );
+}
+
+type VideoAnalysisExecutionTarget = {
+  videoId: string;
+  downloadId: string | null;
+  filePath: string;
+  sourceUrl: string | null;
+  platform: string | null;
+};
+
+async function resolveVideoAnalysisExecutionTarget(
+  videoId: string
+): Promise<VideoAnalysisExecutionTarget> {
+  const analysis = (await VideoAnalysis.findOne({ videoId }).lean().exec()) as StoredVideoAnalysis | null;
+  const download = Types.ObjectId.isValid(videoId)
+    ? ((await Download.findById(videoId).exec()) as DownloadReferenceDocument | null)
+    : null;
+
+  if (download?.status === "completed" && download.fileName?.trim()) {
+    return {
+      videoId,
+      downloadId: download._id.toString(),
+      filePath: buildStoredDownloadFilePath(download.fileName),
+      sourceUrl: download.url ?? analysis?.sourceUrl ?? null,
+      platform: download.provider ?? analysis?.platform ?? null,
+    };
+  }
+
+  if (analysis) {
+    return {
+      videoId: analysis.videoId,
+      downloadId: analysis.downloadId ?? download?._id.toString() ?? null,
+      filePath: analysis.filePath,
+      sourceUrl: download?.url ?? analysis.sourceUrl ?? null,
+      platform: download?.provider ?? analysis.platform ?? null,
+    };
+  }
+
+  if (download) {
+    throw new ApiError(409, "The download exists but is not ready for analysis.");
+  }
+
+  throw new ApiError(404, "Video analysis was not found.");
+}
+
 export async function listVideoAnalyses() {
   await connectToDatabase();
 
@@ -131,6 +183,20 @@ export async function listVideoAnalyses() {
   );
 }
 
+export async function listVerifiedVideoAnalysisIds() {
+  await connectToDatabase();
+
+  const analyses = (await VideoAnalysis.find(
+    { verified: true },
+    { _id: 0, videoId: 1 }
+  )
+    .sort({ updatedAt: -1, videoId: 1 })
+    .lean()
+    .exec()) as Array<{ videoId: string }>;
+
+  return analyses.map((analysis) => analysis.videoId);
+}
+
 export async function getVideoAnalysisDetails(videoIdValue: string) {
   await connectToDatabase();
 
@@ -147,6 +213,31 @@ export async function getVideoAnalysisDetails(videoIdValue: string) {
   const download = analysis.downloadId ? downloadById.get(analysis.downloadId) ?? null : null;
 
   return serializeAnalysisDetailRecord(analysis, download);
+}
+
+export async function analyzeVideoByIdDryRun(videoIdValue: string) {
+  await connectToDatabase();
+
+  const videoId = normalizeVideoAnalysisId(videoIdValue);
+  const target = await resolveVideoAnalysisExecutionTarget(videoId);
+  const fileInfo = await stat(target.filePath).catch(() => null);
+
+  if (!fileInfo?.isFile()) {
+    throw new ApiError(404, "Video file was not found in storage.");
+  }
+
+  return processVideo(
+    target.videoId,
+    target.filePath,
+    target.sourceUrl ?? undefined,
+    target.platform ?? undefined,
+    {
+      downloadId: target.downloadId,
+      persistDocument: false,
+      updateDownloadState: false,
+      writeLogs: false,
+    }
+  );
 }
 
 export async function updateVideoAnalysisVerification(

@@ -106,6 +106,23 @@ type AnalysisLogger = (
   details?: Record<string, unknown>
 ) => Promise<void>;
 
+interface AnalysisStateUpdateInput {
+  analysisStatus: DownloadAnalysisStatus;
+  analysisProgressPercent?: number | null;
+  analysisStage?: string | null;
+  analysisErrorMessage?: string | null;
+  analyzed?: Date | null;
+}
+
+type AnalysisStateUpdater = (input: AnalysisStateUpdateInput) => Promise<void>;
+
+interface ProcessVideoOptions {
+  downloadId?: string | null;
+  persistDocument?: boolean;
+  updateDownloadState?: boolean;
+  writeLogs?: boolean;
+}
+
 interface StageRunOptions {
   allowFailure?: boolean;
   debugStore?: Record<string, unknown>;
@@ -334,7 +351,11 @@ function buildAnalysisStageMessage(status: DownloadAnalysisStatus, stageKey?: An
   return stageKey ? STAGE_LABELS[stageKey] : "Analyzing video";
 }
 
-function createAnalysisLogger(downloadId: string): AnalysisLogger {
+function createAnalysisLogger(downloadId: string, enabled = true): AnalysisLogger {
+  if (!enabled) {
+    return async () => undefined;
+  }
+
   return async (level, message, details) => {
     await createLogEntry({
       scope: ANALYSIS_SCOPE,
@@ -354,13 +375,7 @@ function createCommandLogger(logger: AnalysisLogger) {
 
 async function updateDownloadAnalysisState(
   downloadId: string,
-  input: {
-    analysisStatus: DownloadAnalysisStatus;
-    analysisProgressPercent?: number | null;
-    analysisStage?: string | null;
-    analysisErrorMessage?: string | null;
-    analyzed?: Date | null;
-  }
+  input: AnalysisStateUpdateInput
 ) {
   await Download.findByIdAndUpdate(downloadId, {
     $set: {
@@ -373,15 +388,26 @@ async function updateDownloadAnalysisState(
   }).exec();
 }
 
+function createAnalysisStateUpdater(
+  downloadId: string | null | undefined,
+  enabled = true
+): AnalysisStateUpdater {
+  if (!enabled || !downloadId) {
+    return async () => undefined;
+  }
+
+  return async (input) => updateDownloadAnalysisState(downloadId, input);
+}
+
 async function runStage<T>(
-  downloadId: string,
+  updateAnalysisState: AnalysisStateUpdater,
   stageKey: AnalysisPipelineStageKey,
   pipeline: Record<AnalysisPipelineStageKey, PipelineStageRecord>,
   logger: AnalysisLogger,
   task: () => Promise<T>
 ): Promise<T>;
 async function runStage<T>(
-  downloadId: string,
+  updateAnalysisState: AnalysisStateUpdater,
   stageKey: AnalysisPipelineStageKey,
   pipeline: Record<AnalysisPipelineStageKey, PipelineStageRecord>,
   logger: AnalysisLogger,
@@ -389,7 +415,7 @@ async function runStage<T>(
   options: StageRunOptions & { allowFailure?: false | undefined }
 ): Promise<T>;
 async function runStage<T>(
-  downloadId: string,
+  updateAnalysisState: AnalysisStateUpdater,
   stageKey: AnalysisPipelineStageKey,
   pipeline: Record<AnalysisPipelineStageKey, PipelineStageRecord>,
   logger: AnalysisLogger,
@@ -397,7 +423,7 @@ async function runStage<T>(
   options: StageRunOptions & { allowFailure: true }
 ): Promise<T | null>;
 async function runStage<T>(
-  downloadId: string,
+  updateAnalysisState: AnalysisStateUpdater,
   stageKey: AnalysisPipelineStageKey,
   pipeline: Record<AnalysisPipelineStageKey, PipelineStageRecord>,
   logger: AnalysisLogger,
@@ -414,7 +440,7 @@ async function runStage<T>(
     error: null,
   };
 
-  await updateDownloadAnalysisState(downloadId, {
+  await updateAnalysisState({
     analysisStatus: "analyzing",
     analysisProgressPercent: getStageProgressPercent(stageKey, false),
     analysisStage: buildAnalysisStageMessage("analyzing", stageKey),
@@ -442,7 +468,7 @@ async function runStage<T>(
       elapsedMs: Date.now() - startedAtMs,
     });
 
-    await updateDownloadAnalysisState(downloadId, {
+    await updateAnalysisState({
       analysisStatus: "analyzing",
       analysisProgressPercent: getStageProgressPercent(stageKey, true),
       analysisStage: buildAnalysisStageMessage("analyzing", stageKey),
@@ -1673,12 +1699,23 @@ export async function processVideo(
   videoId: string,
   filePath: string,
   sourceUrl?: string,
-  platform?: string
+  platform?: string,
+  options?: ProcessVideoOptions
 ): Promise<VideoAnalysisDocumentData> {
   await connectToDatabase();
 
-  const logger = createAnalysisLogger(videoId);
+  const effectiveDownloadId =
+    options?.downloadId === undefined ? videoId : options.downloadId;
+  const shouldPersistDocument = options?.persistDocument ?? true;
+  const logger = createAnalysisLogger(
+    effectiveDownloadId ?? videoId,
+    options?.writeLogs ?? true
+  );
   const commandLogger = createCommandLogger(logger);
+  const updateAnalysisState = createAnalysisStateUpdater(
+    effectiveDownloadId,
+    options?.updateDownloadState ?? true
+  );
   const pipeline = createDefaultPipeline();
   const debug: Record<string, unknown> = {};
   let mediaMetadata = createEmptyMediaMetadata();
@@ -1710,7 +1747,7 @@ export async function processVideo(
     await mkdir(analysisDirectory, { recursive: true });
 
     mediaMetadata = await runStage(
-      videoId,
+      updateAnalysisState,
       "probe",
       pipeline,
       logger,
@@ -1720,7 +1757,7 @@ export async function processVideo(
 
     if (mediaMetadata.audioPresent) {
       const extractedAudioPath = await runStage(
-        videoId,
+        updateAnalysisState,
         "audioExtraction",
         pipeline,
         logger,
@@ -1761,7 +1798,7 @@ export async function processVideo(
 
     if (artifacts.audioPath) {
       const transcriptionResult = await runStage(
-        videoId,
+        updateAnalysisState,
         "transcription",
         pipeline,
         logger,
@@ -1803,7 +1840,7 @@ export async function processVideo(
     }
 
     const sceneDetection = await runStage(
-      videoId,
+      updateAnalysisState,
       "sceneDetection",
       pipeline,
       logger,
@@ -1819,7 +1856,7 @@ export async function processVideo(
     artifacts.tempFiles.push(...sceneDetection.tempFiles);
 
     const frameSelection = await runStage(
-      videoId,
+      updateAnalysisState,
       "frameSelection",
       pipeline,
       logger,
@@ -1837,7 +1874,7 @@ export async function processVideo(
     artifacts.framePaths = frames.map((frame) => frame.framePath);
 
     const ocrFrames = await runStage(
-      videoId,
+      updateAnalysisState,
       "ocr",
       pipeline,
       logger,
@@ -1882,7 +1919,7 @@ export async function processVideo(
 
     if (artifacts.audioPath) {
       const audioAnalysisResult = await runStage(
-        videoId,
+        updateAnalysisState,
         "audioAnalysis",
         pipeline,
         logger,
@@ -1923,7 +1960,7 @@ export async function processVideo(
     }
 
     const analyzedFrames = await runStage(
-      videoId,
+      updateAnalysisState,
       "frameAnalysis",
       pipeline,
       logger,
@@ -2006,7 +2043,7 @@ export async function processVideo(
     ].sort((left, right) => left.timestampSec - right.timestampSec);
 
     const synthesis = await runStage(
-      videoId,
+      updateAnalysisState,
       "finalSynthesis",
       pipeline,
       logger,
@@ -2058,7 +2095,7 @@ export async function processVideo(
     const searchText = buildSearchText(analysis, transcript, ocr.summaryText);
     const sceneEmbeddingTexts = buildSceneEmbeddingTexts(sceneEmbeddingSlices);
     const embeddingResult = await runStage(
-      videoId,
+      updateAnalysisState,
       "embeddings",
       pipeline,
       logger,
@@ -2102,32 +2139,33 @@ export async function processVideo(
       status: finalStatus,
     };
 
-    const savedDocument = await saveVideoAnalysisDocument(
-      {
-        videoId,
-        downloadId: videoId,
-        verified: false,
-        filePath,
-        sourceUrl: sourceUrl ?? null,
-        platform: platform ?? null,
-        status: finalStatus,
-        mediaMetadata,
-        artifacts,
-        transcript,
-        scenes,
-        frames,
-        ocr,
-        audioHeuristics,
-        frameAnalyses,
-        analysis,
-        embeddings,
-        pipeline,
-        debug: Object.keys(debug).length > 0 ? debug : null,
-      },
-      logger
-    );
+    const document = {
+      videoId,
+      downloadId: effectiveDownloadId,
+      verified: false,
+      filePath,
+      sourceUrl: sourceUrl ?? null,
+      platform: platform ?? null,
+      status: finalStatus,
+      mediaMetadata,
+      artifacts,
+      transcript,
+      scenes,
+      frames,
+      ocr,
+      audioHeuristics,
+      frameAnalyses,
+      analysis,
+      embeddings,
+      pipeline,
+      debug: Object.keys(debug).length > 0 ? debug : null,
+    } satisfies Omit<VideoAnalysisDocumentData, "createdAt" | "updatedAt">;
 
-    await updateDownloadAnalysisState(videoId, {
+    const savedDocument = shouldPersistDocument
+      ? await saveVideoAnalysisDocument(document, logger)
+      : serializeSavedDocument(document);
+
+    await updateAnalysisState({
       analysisStatus: finalStatus,
       analysisProgressPercent: 100,
       analysisStage: buildAnalysisStageMessage(finalStatus),
@@ -2154,32 +2192,34 @@ export async function processVideo(
       error: failureMessage,
     };
 
-    await saveVideoAnalysisDocument(
-      {
-        videoId,
-        downloadId: videoId,
-        verified: false,
-        filePath,
-        sourceUrl: sourceUrl ?? null,
-        platform: platform ?? null,
-        status: "failed",
-        mediaMetadata,
-        artifacts,
-        transcript,
-        scenes,
-        frames,
-        ocr,
-        audioHeuristics,
-        frameAnalyses,
-        analysis,
-        embeddings,
-        pipeline,
-        debug: Object.keys(debug).length > 0 ? debug : null,
-      },
-      logger
-    ).catch(() => undefined);
+    if (shouldPersistDocument) {
+      await saveVideoAnalysisDocument(
+        {
+          videoId,
+          downloadId: effectiveDownloadId,
+          verified: false,
+          filePath,
+          sourceUrl: sourceUrl ?? null,
+          platform: platform ?? null,
+          status: "failed",
+          mediaMetadata,
+          artifacts,
+          transcript,
+          scenes,
+          frames,
+          ocr,
+          audioHeuristics,
+          frameAnalyses,
+          analysis,
+          embeddings,
+          pipeline,
+          debug: Object.keys(debug).length > 0 ? debug : null,
+        },
+        logger
+      ).catch(() => undefined);
+    }
 
-    await updateDownloadAnalysisState(videoId, {
+    await updateAnalysisState({
       analysisStatus: "failed",
       analysisProgressPercent: null,
       analysisStage: buildAnalysisStageMessage("failed"),

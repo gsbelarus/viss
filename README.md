@@ -1,36 +1,59 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# VISS
 
-## Getting Started
+VISS is a local Next.js application for reviewing downloaded videos, running the video-analysis pipeline, inspecting stored analyses, and generating scripts from those results. Analysis metadata is stored in MongoDB, while downloaded media and derived artifacts live under `storage/`.
 
-First, run the development server:
+## Development
+
+Install dependencies and start the app:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Useful commands:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- `pnpm lint`
+- `pnpm test`
+- `pnpm build`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Make sure the repository's usual environment variables for MongoDB, OpenAI, and any other local services are configured before starting the app.
 
-## Learn More
+## Embedded MCP Server
 
-To learn more about Next.js, take a look at the following resources:
+While the app is running, it also exposes an MCP endpoint at `http://127.0.0.1:3000/api/mcp`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Available tools:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- `list_verified_analysis_ids`: returns the ids of analyses currently marked as verified.
+- `get_existing_analysis`: fetches the stored analysis document for a given id.
+- `analyze_video_dry_run`: reruns the current analysis pipeline for a stored video and returns the full result without writing analysis documents, download status updates, or log entries.
+- `compare_existing_and_dry_run_analysis`: returns the stored analysis, the dry-run analysis, and a compact comparison block with key fields side by side.
 
-## Deploy on Vercel
+Notes:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- The MCP endpoint is stateless and intended for local development use.
+- `analyze_video_dry_run` still reads the stored media file and calls the live analysis pipeline, so it can take time and consume API quota.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Connect From VS Code
+
+Create `.vscode/mcp.json` in this workspace with the following content:
+
+```json
+{
+	"servers": {
+		"viss": {
+			"type": "http",
+			"url": "http://127.0.0.1:3000/api/mcp"
+		}
+	}
+}
+```
+
+Then:
+
+1. Start the app with `pnpm dev`.
+2. Let VS Code trust and enable the workspace MCP server when prompted.
+3. Use the MCP tools from Copilot Chat to list verified ids, fetch stored analyses, and run side-by-side dry-run comparisons against your current analysis changes.
+
+If you prefer user-scoped MCP configuration, add the same server entry to your user MCP config instead of the workspace file.
