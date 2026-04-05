@@ -97,6 +97,16 @@ function buildFrameText(frame: FrameAnalysisRecord) {
     .toLowerCase();
 }
 
+function buildCombinedFrameText(
+  frameAnalyses: FrameAnalysisRecord[],
+  minimumTimestampSec = Number.NEGATIVE_INFINITY
+) {
+  return frameAnalyses
+    .filter((frame) => frame.timestampSec >= minimumTimestampSec)
+    .map((frame) => buildFrameText(frame))
+    .join(" ");
+}
+
 function classifyFrameSetting(frame: FrameAnalysisRecord) {
   const text = buildFrameText(frame);
 
@@ -295,17 +305,59 @@ function buildTextEscalationCue(
   );
 
   if (!singledOutFrame || normalTrickFrames.length === 0) {
-    return null;
+    const fastReflexFrames = orderedFrames.filter((frame) =>
+      /\bothers\s+fast\s+reflex\b/.test(normalizeSearchText(frame.text) ?? "")
+    );
+
+    if (
+      !singledOutFrame ||
+      fastReflexFrames.length < 3 ||
+      singledOutFrame.timestampSec <= fastReflexFrames[0].timestampSec
+    ) {
+      return null;
+    }
+
+    const allFrameText = buildCombinedFrameText(frameAnalyses);
+    const lateFrameText = buildCombinedFrameText(
+      frameAnalyses,
+      Math.max(0, singledOutFrame.timestampSec - 1.5)
+    );
+    const hasBallLanguage = /(soccer ball|football|ball)/.test(allFrameText);
+    const hasTwoBallOrDecoySetup =
+      /\btwo\s+(soccer\s+)?balls?\b/.test(allFrameText) ||
+      /(decoy|second ball|trap|bait|through the legs|between the legs)/.test(allFrameText);
+    const hasPublicTargetLanguage =
+      /(pedestrian|passerby|crowd|rollerblad|police|woman|girls?|street scene|people walking)/.test(
+        allFrameText
+      );
+    const hasLateReversalLanguage =
+      /(two young men|tracksuit|reacting to the other man|looking down and reacting|skull)/.test(
+        lateFrameText
+      );
+
+    if (!hasBallLanguage || !hasTwoBallOrDecoySetup || !hasPublicTargetLanguage) {
+      return null;
+    }
+
+    return {
+      timestampSec: roundTo(singledOutFrame.timestampSec, 3),
+      cueType: "text" as const,
+      observation:
+        "On-screen labels repeat 'OTHERS FAST REFLEX' across public soccer-ball reaction setups, then switch to a late 'THIS GUY' callout for a final one-on-one exchange.",
+      interpretationHint: hasLateReversalLanguage
+        ? "The video is structured as a prank/reflex montage: earlier people are successfully baited by decoy or second-ball through-the-legs moves, but the singled-out final guy reacts fast enough to flip the trick back on the prankster."
+        : "The late label suggests the final participant is the exception within the earlier reflex-prank pattern rather than just another example of ball skill.",
+    } satisfies SynthesisCueInput;
   }
 
   if (singledOutFrame.timestampSec <= normalTrickFrames[0].timestampSec) {
     return null;
   }
 
-  const lateFrameText = frameAnalyses
-    .filter((frame) => frame.timestampSec >= singledOutFrame.timestampSec - 1.5)
-    .map((frame) => buildFrameText(frame))
-    .join(" ");
+  const lateFrameText = buildCombinedFrameText(
+    frameAnalyses,
+    Math.max(0, singledOutFrame.timestampSec - 1.5)
+  );
   const hasCueShotLanguage =
     /(billiard|pool cue|cue stick|cue|pocket|8-ball|pool ball)/.test(lateFrameText) &&
     /(pipe|pvc|elbow|tube|ball)/.test(lateFrameText);
@@ -546,7 +598,11 @@ export function buildStoryHypotheses(
     );
   }
 
-  if (textEscalationCue?.interpretationHint?.includes("billiards-style shot")) {
+  if (textEscalationCue?.interpretationHint?.includes("prank/reflex montage")) {
+    hypotheses.push(
+      "The repeated 'OTHERS FAST REFLEX' label frames a series of public soccer-ball prank tests, but the final 'THIS GUY' beat is the exception: he reacts fast enough to stop the trick and send it back at the prankster."
+    );
+  } else if (textEscalationCue?.interpretationHint?.includes("billiards-style shot")) {
     hypotheses.push(
       "The montage treats most setups as 'normal trick shots' and saves a singled-out, absurdly over-engineered billiards-style cue-and-pipe shot for the finale punchline."
     );

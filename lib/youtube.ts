@@ -4,11 +4,28 @@ import vm from "node:vm";
 
 import { Innertube, Platform, UniversalCache } from "youtubei.js";
 
-const YOUTUBE_DOWNLOAD_OPTIONS = {
-  type: "video+audio",
-  quality: "360p",
-  format: "mp4",
-} as const;
+interface YouTubeDownloadOptions {
+  type: "video+audio";
+  quality: string;
+  format: "mp4";
+}
+
+interface YouTubeDownloadFormat {
+  content_length?: number;
+}
+
+const YOUTUBE_DOWNLOAD_OPTION_CANDIDATES = [
+  {
+    type: "video+audio",
+    quality: "360p",
+    format: "mp4",
+  },
+  {
+    type: "video+audio",
+    quality: "best",
+    format: "mp4",
+  },
+] as const satisfies ReadonlyArray<YouTubeDownloadOptions>;
 
 declare global {
   var __vissYouTubeClientPromise: Promise<Innertube> | undefined;
@@ -132,10 +149,41 @@ export function getYouTubePublishedAt(info: Awaited<ReturnType<typeof getYouTube
   );
 }
 
+function isNoMatchingFormatError(error: unknown) {
+  return error instanceof Error && /no matching formats found/i.test(error.message);
+}
+
+export async function resolveYouTubeDownloadOption(
+  resolveFormat: (options: YouTubeDownloadOptions) => Promise<YouTubeDownloadFormat>
+) {
+  let lastFormatError: Error | null = null;
+
+  for (const options of YOUTUBE_DOWNLOAD_OPTION_CANDIDATES) {
+    try {
+      const format = await resolveFormat(options);
+
+      return {
+        options,
+        format,
+      };
+    } catch (error) {
+      if (!isNoMatchingFormatError(error)) {
+        throw error;
+      }
+
+      lastFormatError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  throw lastFormatError ?? new Error("No matching formats found");
+}
+
 export async function getYouTubeDownloadResources(videoId: string) {
   const client = await getYouTubeClient();
-  const format = await client.getStreamingData(videoId, YOUTUBE_DOWNLOAD_OPTIONS);
-  const stream = await client.download(videoId, YOUTUBE_DOWNLOAD_OPTIONS);
+  const { format, options } = await resolveYouTubeDownloadOption((candidate) =>
+    client.getStreamingData(videoId, candidate)
+  );
+  const stream = await client.download(videoId, options);
 
   return {
     stream: Readable.fromWeb(stream as unknown as WebReadableStream<Uint8Array>),

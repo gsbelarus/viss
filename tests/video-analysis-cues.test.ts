@@ -252,3 +252,166 @@ test("text escalation cue singles out a labeled finale as the punchline", () => 
     hypotheses.some((hypothesis) => hypothesis.includes("over-engineered billiards-style"))
   );
 });
+
+test("fast reflex labels can signal a final prank reversal instead of a generic skill montage", () => {
+  const ocr: OcrRecord = {
+    status: "completed",
+    detected: true,
+    summaryText: "OTHERS FAST REFLEX\nTHIS GUY",
+    frames: [
+      {
+        timestampSec: 0.4,
+        framePath: "frame-001.jpg",
+        text: "OTHERS FAST REFLEX",
+        confidence: 0.97,
+        boxes: [],
+      },
+      {
+        timestampSec: 13.2,
+        framePath: "frame-002.jpg",
+        text: "OTHERS FAST REFLEX",
+        confidence: 0.96,
+        boxes: [],
+      },
+      {
+        timestampSec: 39.6,
+        framePath: "frame-003.jpg",
+        text: "OTHERS FAST REFLEX",
+        confidence: 0.95,
+        boxes: [],
+      },
+      {
+        timestampSec: 52.8,
+        framePath: "frame-004.jpg",
+        text: "THIS GUY",
+        confidence: 0.95,
+        boxes: [],
+      },
+    ],
+    error: null,
+  };
+
+  const frameAnalyses: FrameAnalysisRecord[] = [
+    {
+      timestampSec: 13.2,
+      sceneDescription: "A prankster waits for a passerby on a city street with a soccer ball at his feet.",
+      subjects: ["man", "woman passerby"],
+      objects: ["soccer ball"],
+      actions: ["baiting a passerby", "preparing a reflex prank"],
+      environment: "pedestrian street",
+      cameraFraming: "medium shot",
+      emotionalTone: "playful setup",
+      facialExpression: "smug anticipation",
+      visualDevices: [],
+      visibleTextSummary: "OTHERS FAST REFLEX",
+      storyRole: "setup",
+      observedFacts: ["A passerby approaches while the prankster gestures toward the ball."],
+      inferences: ["The scene sets up a public reflex test rather than a freestyle performance."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 27.6,
+      sceneDescription: "A man places two soccer balls in front of a passerby while police officers look on.",
+      subjects: ["man", "police officer"],
+      objects: ["two soccer balls"],
+      actions: ["setting a decoy ball", "readying a second ball trick"],
+      environment: "city street",
+      cameraFraming: "wide shot",
+      emotionalTone: "teasing",
+      facialExpression: "focused grin",
+      visualDevices: [],
+      visibleTextSummary: "OTHERS FAST REFLEX",
+      storyRole: "development",
+      observedFacts: ["Two soccer balls are used to test the target's reflexes in public."],
+      inferences: ["The decoy setup suggests the prankster wants the target to react to the wrong ball."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 39.6,
+      sceneDescription: "A woman steps toward a decoy ball while a second move is aimed through her legs.",
+      subjects: ["woman", "man"],
+      objects: ["red ball", "second ball"],
+      actions: ["reacting to the first ball", "sending a second ball through the legs"],
+      environment: "busy street",
+      cameraFraming: "medium shot",
+      emotionalTone: "gotcha humor",
+      facialExpression: "startled reaction",
+      visualDevices: [],
+      visibleTextSummary: "OTHERS FAST REFLEX",
+      storyRole: "development",
+      observedFacts: ["The prank depends on the target responding to the decoy ball first."],
+      inferences: ["Earlier targets are being tricked successfully."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 52.8,
+      sceneDescription: "A singled-out young man is introduced as the final target while balancing a soccer ball and holding another ball.",
+      subjects: ["young man"],
+      objects: ["soccer ball", "basketball"],
+      actions: ["balancing a ball", "preparing for a one-on-one exchange"],
+      environment: "pedestrian street",
+      cameraFraming: "medium shot",
+      emotionalTone: "standout challenge",
+      facialExpression: "calm focus",
+      visualDevices: [],
+      visibleTextSummary: "THIS GUY",
+      storyRole: "reveal",
+      observedFacts: ["The late caption isolates this participant from the earlier group examples."],
+      inferences: ["He is being framed as the exception to the earlier pattern."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 57.6,
+      sceneDescription: "Two young men face each other as the final target stops the trick and knocks the ball back through the prankster's legs while a skull graphic appears.",
+      subjects: ["man in black", "man in gray"],
+      objects: ["soccer ball", "skull graphic"],
+      actions: ["stopping the incoming ball", "sending it back between the legs", "reacting to the reversal"],
+      environment: "street",
+      cameraFraming: "medium shot",
+      emotionalTone: "comic reversal",
+      facialExpression: "smug satisfaction",
+      visualDevices: ["skull reaction graphic"],
+      visibleTextSummary: "THIS GUY",
+      storyRole: "payoff",
+      observedFacts: ["The singled-out final target turns the prank back on the instigator."],
+      inferences: ["The joke is that the last participant beats the prankster at his own reflex trick."],
+      uncertainties: [],
+    },
+  ];
+
+  const audioHeuristics: AudioHeuristicsRecord = {
+    status: "completed",
+    audioPresent: true,
+    speechPresentLikely: false,
+    musicPresentLikely: true,
+    musicPresenceConfidence: 0.71,
+    avgRmsEnergy: 0.04,
+    peakRmsEnergy: 0.12,
+    energyTimeline: [],
+    transitionSignals: [],
+    silenceRegions: [],
+    dynamicProfile: "high_energy",
+    notes: [],
+    error: null,
+  };
+
+  const cues = buildSynthesisCueTimeline(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    cues.some(
+      (cue) =>
+        cue.observation.includes("OTHERS FAST REFLEX") &&
+        cue.interpretationHint?.includes("prank/reflex montage")
+    )
+  );
+
+  const hypotheses = buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    hypotheses.some(
+      (hypothesis) =>
+        hypothesis.includes("public soccer-ball prank tests") &&
+        hypothesis.includes("stop the trick and send it back")
+    )
+  );
+});
