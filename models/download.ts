@@ -1,6 +1,7 @@
 import { Model, Schema, Types, model, models } from "mongoose";
 
 import type { DownloadStatus, VideoProvider } from "@/lib/downloads-shared";
+import type { DownloadAnalysisStatus } from "@/lib/video-analysis-shared";
 
 export interface DownloadDocument {
   provider: VideoProvider;
@@ -14,6 +15,11 @@ export interface DownloadDocument {
   bytesReceived: number;
   expectedSize: number | null;
   errorMessage: string | null;
+  analysisStatus: DownloadAnalysisStatus;
+  analysisProgressPercent: number | null;
+  analysisStage: string | null;
+  analysisErrorMessage: string | null;
+  analyzed: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -76,6 +82,34 @@ const downloadSchema = new Schema<DownloadDocument>(
       type: String,
       default: null,
       trim: true,
+    },
+    analysisStatus: {
+      type: String,
+      required: true,
+      enum: ["not_started", "queued", "analyzing", "completed", "partial", "failed"],
+      default: "not_started",
+    },
+    analysisProgressPercent: {
+      type: Number,
+      default: null,
+      min: 0,
+      max: 100,
+    },
+    analysisStage: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 120,
+    },
+    analysisErrorMessage: {
+      type: String,
+      default: null,
+      trim: true,
+      maxlength: 500,
+    },
+    analyzed: {
+      type: Date,
+      default: null,
     },
   },
   {

@@ -5,9 +5,9 @@ import { useCallback, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 
 import type {
-  ActiveDownloadRecord,
-  ActiveDownloadsResponse,
-} from "@/lib/downloads-shared";
+  ActiveProcessRecord,
+  ActiveProcessesResponse,
+} from "@/lib/processes-shared";
 
 const navigationItems = [
   {
@@ -36,27 +36,6 @@ const navigationItems = [
     description: "Download activity and events",
   },
 ];
-
-function formatBytes(value: number | null) {
-  if (value === null || !Number.isFinite(value)) {
-    return "Calculating";
-  }
-
-  if (value < 1024) {
-    return `${value} B`;
-  }
-
-  const units = ["KB", "MB", "GB", "TB"];
-  let size = value / 1024;
-  let unitIndex = 0;
-
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${size.toFixed(size >= 100 ? 0 : 1)} ${units[unitIndex]}`;
-}
 
 function formatSegment(segment: string) {
   return segment
@@ -87,7 +66,7 @@ type AppShellProps = Readonly<{
 
 export default function AppShell({ children }: AppShellProps) {
   const pathname = usePathname();
-  const [activeJobs, setActiveJobs] = useState<ActiveDownloadRecord[]>([]);
+  const [activeJobs, setActiveJobs] = useState<ActiveProcessRecord[]>([]);
   const activeItem = navigationItems.find((item) => item.href === pathname);
   const pageTitle = activeItem?.label ?? getPageTitle(pathname);
   const activeJob = activeJobs[0] ?? null;
@@ -102,7 +81,7 @@ export default function AppShell({ children }: AppShellProps) {
         return;
       }
 
-      const payload = (await response.json()) as ActiveDownloadsResponse;
+      const payload = (await response.json()) as ActiveProcessesResponse;
       setActiveJobs(payload.jobs);
     } catch {
       // Keep the shell quiet when polling fails.
@@ -192,33 +171,36 @@ export default function AppShell({ children }: AppShellProps) {
                 <div className="w-full max-w-sm border border-stone-900/8 bg-white/70 px-3 py-3 sm:ml-auto">
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-[0.78rem] font-medium text-stone-900">
-                      {activeJob.name || "YouTube download"}
+                      {activeJob.name ||
+                        (activeJob.kind === "analysis"
+                          ? "Video analysis"
+                          : "YouTube download")}
                     </p>
+                    <p className="mt-1 font-mono text-[0.68rem] uppercase tracking-[0.18em] text-stone-500">
+                      {activeJob.statusLabel}
+                    </p>
+                  </div>
+                  <div className="text-right">
                     <p className="font-mono text-[0.68rem] uppercase tracking-[0.18em] text-stone-500">
                       {activeJob.progressPercent !== null
                         ? `${activeJob.progressPercent}%`
                         : activeJob.status === "queued"
                           ? "Queued"
-                          : "Preparing"}
+                          : "Working"}
                     </p>
                   </div>
 
                   <div className="mt-2 h-1.5 overflow-hidden bg-stone-900/10">
                     <div
-                      className="h-full bg-emerald-800 transition-[width] duration-300"
+                      className={`h-full transition-[width] duration-300 ${activeJob.kind === "analysis" ? "bg-amber-700" : "bg-emerald-800"}`}
                       style={{
-                        width: `${activeJob.progressPercent ?? 12}%`,
+                        width: `${activeJob.progressPercent ?? (activeJob.status === "queued" ? 8 : 12)}%`,
                       }}
                     />
                   </div>
 
                   <div className="mt-2 flex items-center justify-between gap-3 text-[0.72rem] text-stone-500">
-                    <span>
-                      {formatBytes(activeJob.bytesReceived)}
-                      {activeJob.expectedSize !== null
-                        ? ` / ${formatBytes(activeJob.expectedSize)}`
-                        : ""}
-                    </span>
+                    <span>{activeJob.detailText || activeJob.statusLabel}</span>
                     {activeJobs.length > 1 ? (
                       <span>{`+${activeJobs.length - 1} more`}</span>
                     ) : null}
