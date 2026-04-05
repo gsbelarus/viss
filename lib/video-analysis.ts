@@ -14,7 +14,13 @@ import {
   readFrameHistogramData,
 } from "@/lib/video-analysis/ffmpeg";
 import {
+  buildAudioTransitionSignals,
+  buildStoryHypotheses,
+  buildSynthesisCueTimeline,
+} from "@/lib/video-analysis/cues";
+import {
   clampFrameTimestamp,
+  getLateCoverageCandidateTimestamps,
   getMinimumRepresentativeFrameCount,
 } from "@/lib/video-analysis/sampling";
 import {
@@ -25,6 +31,7 @@ import {
   synthesizeVideoWithOpenAI,
   transcribeAudioWithOpenAI,
 } from "@/lib/video-analysis/openai";
+import { finalizeTranscriptCandidate } from "@/lib/video-analysis/transcript";
 import type {
   AnalysisPipelineStageKey,
   AnalysisRecord,
@@ -179,7 +186,11 @@ function createEmptyTranscript(): TranscriptRecord {
     provider: "openai",
     language: null,
     text: null,
+    rawText: null,
     segments: [],
+    audibleSpeechLikely: false,
+    confidence: null,
+    suppressionReason: null,
     error: null,
   };
 }
@@ -218,6 +229,7 @@ function createEmptyAudioHeuristics(): AudioHeuristicsRecord {
     avgRmsEnergy: 0,
     peakRmsEnergy: 0,
     energyTimeline: [],
+    transitionSignals: [],
     silenceRegions: [],
     dynamicProfile: "very_calm",
     notes: [],
@@ -229,6 +241,7 @@ function createEmptyAnalysis(): AnalysisRecord {
   return {
     status: "failed",
     summary: null,
+    mainIdea: null,
     language: null,
     contentCategory: null,
     narrativeStructure: {
@@ -246,6 +259,8 @@ function createEmptyAnalysis(): AnalysisRecord {
     onScreenTextRole: null,
     probableScript: null,
     sceneBySceneReconstruction: [],
+    techniques: [],
+    narrativeCues: [],
     observedFacts: [],
     inferredElements: [],
     uncertainElements: [],
@@ -355,26 +370,6 @@ async function updateDownloadAnalysisState(
       analyzed: input.analyzed ?? null,
     },
   }).exec();
-}
-
-function captureDebugPayload(
-  debugStore: Record<string, unknown> | undefined,
-  stageKey: AnalysisPipelineStageKey,
-  error: unknown
-) {
-  if (!debugStore || !(error instanceof ApiError) || !isRecord(error.details)) {
-    return;
-  }
-
-  const rawOutput = error.details.rawOutput;
-  const validationError = error.details.validationError;
-
-  if (typeof rawOutput === "string" || typeof validationError === "string") {
-    debugStore[stageKey] = {
-      rawOutput: typeof rawOutput === "string" ? rawOutput : null,
-      validationError: typeof validationError === "string" ? validationError : null,
-    };
-  }
 }
 
 async function runStage<T>(
@@ -543,6 +538,26 @@ function computeVisualDifference(left: Buffer, right: Buffer) {
   return differenceSum / (length * 255);
 }
 
+function captureDebugPayload(
+  debugStore: Record<string, unknown> | undefined,
+  stageKey: AnalysisPipelineStageKey,
+  error: unknown
+) {
+  if (!debugStore || !(error instanceof ApiError) || !isRecord(error.details)) {
+    return;
+  }
+
+  const rawOutput = error.details.rawOutput;
+  const validationError = error.details.validationError;
+
+  if (typeof rawOutput === "string" || typeof validationError === "string") {
+    debugStore[stageKey] = {
+      rawOutput: typeof rawOutput === "string" ? rawOutput : null,
+      validationError: typeof validationError === "string" ? validationError : null,
+    };
+  }
+}
+
 async function detectSceneCandidates(
   filePath: string,
   durationSec: number,
@@ -616,6 +631,17 @@ async function selectRepresentativeFrames(
     selectionReason: "early_hook" as const,
     score: null,
   }));
+  const lateCoverageTargets = getLateCoverageCandidateTimestamps(
+    durationSec,
+    sceneCandidates.map((candidate) => ({
+      timestampSec: candidate.timestampSec,
+      score: candidate.score,
+    }))
+  ).map((timestampSec) => ({
+    timestampSec,
+    selectionReason: "uniform_backfill" as const,
+    score: null,
+  }));
   const sceneTargets = [...sceneCandidates]
     .sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
     .map((candidate) => ({
@@ -636,7 +662,13 @@ async function selectRepresentativeFrames(
 
   const prioritizedTargets: FrameSelectionTarget[] = [];
 
-  for (const candidate of [...earlyHookTargets, ...sceneTargets, ...uniformTargets, ...fallbackTargets]) {
+  for (const candidate of [
+    ...earlyHookTargets,
+    ...lateCoverageTargets,
+    ...sceneTargets,
+    ...uniformTargets,
+    ...fallbackTargets,
+  ]) {
     if (isTimestampNear(prioritizedTargets, candidate.timestampSec, minimumSpacingSec)) {
       continue;
     }
@@ -647,8 +679,6 @@ async function selectRepresentativeFrames(
       break;
     }
   }
-
-  prioritizedTargets.sort((left, right) => left.timestampSec - right.timestampSec);
 
   const selectedFrames: SelectedFrameRecord[] = [];
   const keptHistograms: Buffer[] = [];
@@ -692,7 +722,12 @@ async function selectRepresentativeFrames(
   }
 
   return {
-    frames: selectedFrames,
+    frames: [...selectedFrames]
+      .sort((left, right) => left.timestampSec - right.timestampSec)
+      .map((frame, index) => ({
+        ...frame,
+        frameIndex: index + 1,
+      })),
   };
 }
 
@@ -919,6 +954,29 @@ function readChunkHeader(buffer: Buffer, offset: number) {
   };
 }
 
+function computeZeroCrossingRate(samples: Int16Array, startIndex: number, endIndex: number) {
+  const sampleCount = endIndex - startIndex;
+
+  if (sampleCount <= 1) {
+    return 0;
+  }
+
+  let crossings = 0;
+  let previous = samples[startIndex];
+
+  for (let index = startIndex + 1; index < endIndex; index += 1) {
+    const current = samples[index];
+
+    if ((previous < 0 && current >= 0) || (previous > 0 && current <= 0)) {
+      crossings += 1;
+    }
+
+    previous = current;
+  }
+
+  return crossings / (sampleCount - 1);
+}
+
 async function readWavMonoSamples(audioPath: string): Promise<WavSamplesResult> {
   const buffer = await readFile(audioPath);
 
@@ -1045,13 +1103,14 @@ function calculateTranscriptCoverage(transcript: TranscriptRecord, durationSec: 
 async function analyzeAudioHeuristics(
   audioPath: string,
   transcript: TranscriptRecord
-): Promise<AudioHeuristicsRecord> {
+): Promise<{ record: AudioHeuristicsRecord; speechLikelihoodScore: number }> {
   const { sampleRate, samples } = await readWavMonoSamples(audioPath);
   const windowDurationSec = 0.5;
   const windowSize = Math.max(1, Math.floor(sampleRate * windowDurationSec));
   const energyTimeline: AudioHeuristicsRecord["energyTimeline"] = [];
   let rmsTotal = 0;
   let peakRmsEnergy = 0;
+  let zeroCrossingTotal = 0;
 
   for (let startIndex = 0; startIndex < samples.length; startIndex += windowSize) {
     const endIndex = Math.min(samples.length, startIndex + windowSize);
@@ -1066,6 +1125,7 @@ async function analyzeAudioHeuristics(
 
     const frameSampleCount = Math.max(1, endIndex - startIndex);
     const rms = Math.sqrt(squareSum / frameSampleCount);
+    const zeroCrossingRate = computeZeroCrossingRate(samples, startIndex, endIndex);
     const startSec = startIndex / sampleRate;
     const endSec = endIndex / sampleRate;
 
@@ -1073,15 +1133,20 @@ async function analyzeAudioHeuristics(
       startSec: roundTo(startSec, 3),
       endSec: roundTo(endSec, 3),
       rms: roundTo(rms, 4),
+      zeroCrossingRate: roundTo(zeroCrossingRate, 4),
     });
 
     rmsTotal += rms;
+    zeroCrossingTotal += zeroCrossingRate;
     peakRmsEnergy = Math.max(peakRmsEnergy, peak);
   }
 
   const avgRmsEnergy = energyTimeline.length > 0 ? rmsTotal / energyTimeline.length : 0;
+  const avgZeroCrossingRate =
+    energyTimeline.length > 0 ? zeroCrossingTotal / energyTimeline.length : 0;
   const silenceThreshold = Math.max(0.015, avgRmsEnergy * 0.35);
   const silenceRegions = buildSilenceRegions(energyTimeline, silenceThreshold);
+  const transitionSignals = buildAudioTransitionSignals(energyTimeline, silenceThreshold);
   const transcriptCoverage = calculateTranscriptCoverage(
     transcript,
     energyTimeline.length > 0 ? energyTimeline[energyTimeline.length - 1].endSec : 0
@@ -1095,32 +1160,66 @@ async function analyzeAudioHeuristics(
     energyTimeline.length > 0
       ? Math.min(1, silenceRegions.length / Math.max(1, energyTimeline.length / 4))
       : 0;
+  const rmsVariance =
+    energyTimeline.length > 0
+      ? energyTimeline.reduce((sum, entry) => sum + (entry.rms - avgRmsEnergy) ** 2, 0) /
+      energyTimeline.length
+      : 0;
+  const zeroCrossingVariance =
+    energyTimeline.length > 0
+      ? energyTimeline.reduce(
+        (sum, entry) => sum + (entry.zeroCrossingRate - avgZeroCrossingRate) ** 2,
+        0
+      ) / energyTimeline.length
+      : 0;
+  const speechLikelihoodScore = Math.max(
+    0,
+    Math.min(
+      1,
+      pauseDensity * 0.45 +
+      Math.min(1, Math.sqrt(rmsVariance) / 0.04) * 0.25 +
+      Math.min(1, Math.sqrt(zeroCrossingVariance) / 0.06) * 0.2 +
+      (1 - activeEnergyRatio) * 0.1
+    )
+  );
   const musicPresenceConfidence = Math.max(
     0,
-    Math.min(1, activeEnergyRatio * 0.45 + (1 - pauseDensity) * 0.3 + (1 - transcriptCoverage) * 0.25)
+    Math.min(
+      1,
+      activeEnergyRatio * 0.4 +
+      (1 - pauseDensity) * 0.25 +
+      (1 - transcriptCoverage) * 0.2 +
+      (1 - speechLikelihoodScore) * 0.15
+    )
   );
-  const speechPresentLikely = Boolean(transcript.text && transcript.text.trim()) || transcriptCoverage > 0.08;
+  const speechPresentLikely = speechLikelihoodScore >= 0.5;
   const musicPresentLikely = musicPresenceConfidence >= 0.55;
   const dynamicProfile = determineDynamicProfile(avgRmsEnergy, peakRmsEnergy);
   const notes = [
     `Computed ${energyTimeline.length} RMS windows at ${windowDurationSec.toFixed(1)} second resolution.`,
     `Transcript coverage estimate: ${(transcriptCoverage * 100).toFixed(0)}%.`,
     `Heuristic music confidence: ${(musicPresenceConfidence * 100).toFixed(0)}%.`,
+    `Audio-only speech likelihood: ${(speechLikelihoodScore * 100).toFixed(0)}%.`,
+    `Detected ${transitionSignals.length} notable audio transition signal(s).`,
   ];
 
   return {
-    status: "completed",
-    audioPresent: true,
-    speechPresentLikely,
-    musicPresentLikely,
-    musicPresenceConfidence: roundTo(musicPresenceConfidence, 4),
-    avgRmsEnergy: roundTo(avgRmsEnergy, 4),
-    peakRmsEnergy: roundTo(peakRmsEnergy, 4),
-    energyTimeline,
-    silenceRegions,
-    dynamicProfile,
-    notes,
-    error: null,
+    record: {
+      status: "completed",
+      audioPresent: true,
+      speechPresentLikely,
+      musicPresentLikely,
+      musicPresenceConfidence: roundTo(musicPresenceConfidence, 4),
+      avgRmsEnergy: roundTo(avgRmsEnergy, 4),
+      peakRmsEnergy: roundTo(peakRmsEnergy, 4),
+      energyTimeline,
+      transitionSignals,
+      silenceRegions,
+      dynamicProfile,
+      notes,
+      error: null,
+    },
+    speechLikelihoodScore: roundTo(speechLikelihoodScore, 4),
   };
 }
 
@@ -1140,6 +1239,22 @@ function getTranscriptExcerpt(
   }
 
   return transcript.text ? transcript.text.slice(0, 400) : null;
+}
+
+function buildSynthesisTranscriptContext(transcript: TranscriptRecord) {
+  return {
+    status: transcript.status,
+    language: transcript.language,
+    text: transcript.text,
+    segments: transcript.segments.map((segment) => ({
+      startSec: segment.startSec,
+      endSec: segment.endSec,
+      text: segment.text,
+    })),
+    audibleSpeechLikely: transcript.audibleSpeechLikely,
+    confidence: transcript.confidence,
+    suppressionReason: transcript.suppressionReason,
+  };
 }
 
 function inferStoryRoleForScene(
@@ -1170,14 +1285,26 @@ function buildSearchText(
 ) {
   return [
     analysis.summary,
+    analysis.mainIdea ? `Main idea: ${analysis.mainIdea}` : null,
     analysis.narrativeStructure.hook ? `Hook: ${analysis.narrativeStructure.hook}` : null,
     analysis.contentCategory ? `Category: ${analysis.contentCategory}` : null,
     analysis.probableScript ? `Probable script: ${analysis.probableScript}` : null,
+    analysis.techniques.length > 0 ? `Techniques: ${analysis.techniques.join(" | ")}` : null,
+    analysis.narrativeCues.length > 0
+      ? `Narrative cues:\n${analysis.narrativeCues
+        .map(
+          (cue) =>
+            `- ${cue.timestampSec.toFixed(2)}s [${cue.cueType}] ${cue.observation}${cue.interpretation ? ` => ${cue.interpretation}` : ""}`
+        )
+        .join("\n")}`
+      : null,
     ocrSummary ? `OCR summary: ${ocrSummary}` : null,
     transcript.text ? `Transcript: ${transcript.text.slice(0, 1200)}` : null,
     analysis.visualStyle ? `Visual style: ${analysis.visualStyle}` : null,
+    analysis.editingStyle ? `Editing style: ${analysis.editingStyle}` : null,
     analysis.audioRole ? `Audio role: ${analysis.audioRole}` : null,
     analysis.musicRole ? `Music role: ${analysis.musicRole}` : null,
+    analysis.onScreenTextRole ? `On-screen text role: ${analysis.onScreenTextRole}` : null,
   ]
     .filter((value): value is string => Boolean(value && value.trim()))
     .join("\n");
@@ -1216,11 +1343,13 @@ function computeFinalStatus(
 }
 
 function serializeSavedDocument(savedDocument: {
+  verified?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 } & Omit<VideoAnalysisDocumentData, "createdAt" | "updatedAt">) {
   return {
     ...savedDocument,
+    verified: savedDocument.verified === true,
     createdAt: savedDocument.createdAt?.toISOString(),
     updatedAt: savedDocument.updatedAt?.toISOString(),
   } satisfies VideoAnalysisDocumentData;
@@ -1278,6 +1407,12 @@ export async function processVideo(
   const debug: Record<string, unknown> = {};
   let mediaMetadata = createEmptyMediaMetadata();
   let transcript = createEmptyTranscript();
+  let transcriptionCandidate: {
+    provider: "openai";
+    language: string | null;
+    text: string | null;
+    segments: TranscriptRecord["segments"];
+  } | null = null;
   let scenes = createEmptyScenes();
   let frames: SelectedFrameRecord[] = [];
   let ocr = createEmptyOcr();
@@ -1285,6 +1420,7 @@ export async function processVideo(
   let frameAnalyses: FrameAnalysisRecord[] = [];
   let analysis = createEmptyAnalysis();
   let embeddings = createEmptyEmbeddings();
+  let audioSpeechLikelihoodScore = 0.5;
   const analysisDirectory = getAnalysisDirectory(videoId);
   const audioPath = path.join(analysisDirectory, "audio.wav");
   const artifacts = {
@@ -1361,12 +1497,17 @@ export async function processVideo(
       );
 
       if (transcriptionResult) {
+        transcriptionCandidate = transcriptionResult;
         transcript = {
           status: "completed",
           provider: "openai",
           language: transcriptionResult.language,
           text: transcriptionResult.text,
+          rawText: transcriptionResult.text,
           segments: transcriptionResult.segments,
+          audibleSpeechLikely: Boolean(transcriptionResult.text?.trim()),
+          confidence: null,
+          suppressionReason: null,
           error: null,
         };
       } else {
@@ -1477,7 +1618,8 @@ export async function processVideo(
       );
 
       if (audioAnalysisResult) {
-        audioHeuristics = audioAnalysisResult;
+        audioHeuristics = audioAnalysisResult.record;
+        audioSpeechLikelihoodScore = audioAnalysisResult.speechLikelihoodScore;
       } else {
         audioHeuristics = {
           ...audioHeuristics,
@@ -1493,6 +1635,15 @@ export async function processVideo(
         logger,
         "No extracted audio was available for heuristics."
       );
+    }
+
+    if (transcriptionCandidate) {
+      transcript = finalizeTranscriptCandidate(transcriptionCandidate, {
+        durationSec: mediaMetadata.durationSec,
+        audioSpeechLikelihoodScore,
+        audioSpeechPresentLikely:
+          audioHeuristics.status === "completed" ? audioHeuristics.speechPresentLikely : true,
+      });
     }
 
     const analyzedFrames = await runStage(
@@ -1540,8 +1691,10 @@ export async function processVideo(
         synthesizeVideoWithOpenAI(
           {
             mediaMetadata,
-            transcript,
+            transcript: buildSynthesisTranscriptContext(transcript),
             ocrSummary: ocr.summaryText,
+            storyHypotheses: buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics),
+            cueTimeline: buildSynthesisCueTimeline(ocr, frameAnalyses, audioHeuristics),
             frameAnalyses,
             sceneCandidates: scenes.candidates,
             audioHeuristics,
@@ -1553,6 +1706,7 @@ export async function processVideo(
     analysis = {
       status: "completed",
       summary: synthesis.summary,
+      mainIdea: synthesis.mainIdea,
       language: synthesis.language,
       contentCategory: synthesis.contentCategory,
       narrativeStructure: synthesis.narrativeStructure,
@@ -1563,6 +1717,8 @@ export async function processVideo(
       onScreenTextRole: synthesis.onScreenTextRole,
       probableScript: synthesis.probableScript,
       sceneBySceneReconstruction: synthesis.sceneBySceneReconstruction,
+      techniques: synthesis.techniques,
+      narrativeCues: synthesis.narrativeCues,
       observedFacts: synthesis.observedFacts,
       inferredElements: synthesis.inferredElements,
       uncertainElements: synthesis.uncertainElements,
@@ -1627,6 +1783,7 @@ export async function processVideo(
       {
         videoId,
         downloadId: videoId,
+        verified: false,
         filePath,
         sourceUrl: sourceUrl ?? null,
         platform: platform ?? null,
@@ -1678,6 +1835,7 @@ export async function processVideo(
       {
         videoId,
         downloadId: videoId,
+        verified: false,
         filePath,
         sourceUrl: sourceUrl ?? null,
         platform: platform ?? null,
@@ -1714,7 +1872,12 @@ export async function processVideo(
   }
 }
 
-export async function enqueueVideoAnalysis(downloadId: string): Promise<StartVideoAnalysisResponse> {
+export async function enqueueVideoAnalysis(
+  downloadId: string,
+  options?: {
+    overwrite?: boolean;
+  }
+): Promise<StartVideoAnalysisResponse> {
   await connectToDatabase();
 
   if (!Types.ObjectId.isValid(downloadId)) {
@@ -1738,6 +1901,22 @@ export async function enqueueVideoAnalysis(downloadId: string): Promise<StartVid
     analysisJobRegistry.has(downloadId)
   ) {
     throw new ApiError(409, "Video analysis is already running for this download.");
+  }
+
+  const hasSavedAnalysis =
+    download.analysisStatus === "completed" ||
+    download.analysisStatus === "partial" ||
+    Boolean(
+      await VideoAnalysis.exists({
+        videoId: downloadId,
+        status: { $in: ["completed", "partial"] },
+      })
+    );
+
+  if (hasSavedAnalysis && !options?.overwrite) {
+    throw new ApiError(409, "An analysis already exists for this video.", {
+      requiresOverwrite: true,
+    });
   }
 
   const filePath = getDownloadFilePath(download.fileName);

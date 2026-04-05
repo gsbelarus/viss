@@ -4,11 +4,28 @@ import vm from "node:vm";
 
 import { Innertube, Platform, UniversalCache } from "youtubei.js";
 
-const YOUTUBE_DOWNLOAD_OPTIONS = {
-  type: "video+audio",
-  quality: "360p",
-  format: "mp4",
-} as const;
+interface YouTubeDownloadOptions {
+  type: "video+audio";
+  quality: string;
+  format: "mp4";
+}
+
+interface YouTubeDownloadFormat {
+  content_length?: number;
+}
+
+const YOUTUBE_DOWNLOAD_OPTION_CANDIDATES = [
+  {
+    type: "video+audio",
+    quality: "360p",
+    format: "mp4",
+  },
+  {
+    type: "video+audio",
+    quality: "best",
+    format: "mp4",
+  },
+] as const satisfies ReadonlyArray<YouTubeDownloadOptions>;
 
 declare global {
   var __vissYouTubeClientPromise: Promise<Innertube> | undefined;
@@ -86,10 +103,87 @@ export async function getYouTubeBasicInfo(videoId: string) {
   return client.getBasicInfo(videoId);
 }
 
+function parseYouTubeDate(value: unknown) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalizedValue = value.trim();
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  const candidate = /^\d{4}-\d{2}-\d{2}$/.test(normalizedValue)
+    ? `${normalizedValue}T00:00:00.000Z`
+    : normalizedValue;
+  const parsedValue = new Date(candidate);
+
+  return Number.isNaN(parsedValue.getTime()) ? null : parsedValue;
+}
+
+export function getYouTubePublishedAt(info: Awaited<ReturnType<typeof getYouTubeBasicInfo>>) {
+  const playerResponse = info.page[0];
+  const microformat = playerResponse?.microformat;
+
+  if (!microformat || typeof microformat !== "object") {
+    return info.basic_info.start_timestamp ?? null;
+  }
+
+  const metadata = microformat as {
+    publish_date?: unknown;
+    upload_date?: unknown;
+    start_timestamp?: unknown;
+  };
+
+  return (
+    parseYouTubeDate(metadata.publish_date) ??
+    parseYouTubeDate(metadata.upload_date) ??
+    parseYouTubeDate(metadata.start_timestamp) ??
+    info.basic_info.start_timestamp ??
+    null
+  );
+}
+
+function isNoMatchingFormatError(error: unknown) {
+  return error instanceof Error && /no matching formats found/i.test(error.message);
+}
+
+export async function resolveYouTubeDownloadOption(
+  resolveFormat: (options: YouTubeDownloadOptions) => Promise<YouTubeDownloadFormat>
+) {
+  let lastFormatError: Error | null = null;
+
+  for (const options of YOUTUBE_DOWNLOAD_OPTION_CANDIDATES) {
+    try {
+      const format = await resolveFormat(options);
+
+      return {
+        options,
+        format,
+      };
+    } catch (error) {
+      if (!isNoMatchingFormatError(error)) {
+        throw error;
+      }
+
+      lastFormatError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  throw lastFormatError ?? new Error("No matching formats found");
+}
+
 export async function getYouTubeDownloadResources(videoId: string) {
   const client = await getYouTubeClient();
-  const format = await client.getStreamingData(videoId, YOUTUBE_DOWNLOAD_OPTIONS);
-  const stream = await client.download(videoId, YOUTUBE_DOWNLOAD_OPTIONS);
+  const { format, options } = await resolveYouTubeDownloadOption((candidate) =>
+    client.getStreamingData(videoId, candidate)
+  );
+  const stream = await client.download(videoId, options);
 
   return {
     stream: Readable.fromWeb(stream as unknown as WebReadableStream<Uint8Array>),

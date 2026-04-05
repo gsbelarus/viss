@@ -2,13 +2,16 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { formatLocalizedDateTime, getPreferredLocale } from "@/lib/date-time";
 import type { LogRecord, LogsListResponse } from "@/lib/logs-shared";
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
+  return formatLocalizedDateTime(
+    value,
+    typeof navigator === "undefined"
+      ? undefined
+      : getPreferredLocale(navigator.languages) ?? navigator.language
+  );
 }
 
 function summarizeDetails(details: Record<string, unknown> | null) {
@@ -91,8 +94,8 @@ export default function LogsPage() {
   }, [loadLogs]);
 
   return (
-    <div className="space-y-4">
-      <section className="border border-stone-900/8 bg-[rgba(255,252,247,0.92)] p-5 shadow-[0_12px_30px_rgba(28,25,23,0.05)] sm:p-6">
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <section className="shrink-0 border border-stone-900/8 bg-[rgba(255,252,247,0.92)] p-5 shadow-[0_12px_30px_rgba(28,25,23,0.05)] sm:p-6">
         <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
           Logs
         </p>
@@ -102,15 +105,21 @@ export default function LogsPage() {
         </p>
       </section>
 
-      <section className="border border-stone-900/8 bg-[rgba(255,252,247,0.92)] shadow-[0_12px_30px_rgba(28,25,23,0.05)]">
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-stone-900/8 bg-[rgba(255,252,247,0.92)] shadow-[0_12px_30px_rgba(28,25,23,0.05)]">
         {isLoading ? (
-          <div className="px-5 py-8 text-sm text-stone-500">Loading logs...</div>
+          <div className="flex flex-1 items-center px-5 py-8 text-sm text-stone-500">
+            Loading logs...
+          </div>
         ) : loadError ? (
-          <div className="px-5 py-8 text-sm text-rose-700">{loadError}</div>
+          <div className="flex flex-1 items-center px-5 py-8 text-sm text-rose-700">
+            {loadError}
+          </div>
         ) : logs.length === 0 ? (
-          <div className="px-5 py-8 text-sm text-stone-500">No log entries yet.</div>
+          <div className="flex flex-1 items-center px-5 py-8 text-sm text-stone-500">
+            No log entries yet.
+          </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="min-h-0 flex-1 overflow-auto">
             <table className="min-w-full border-collapse text-left">
               <thead>
                 <tr className="border-b border-stone-900/8 bg-stone-950/[0.02]">

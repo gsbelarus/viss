@@ -19,6 +19,7 @@ export interface DownloadRecord {
   url: string;
   fileName: string | null;
   size: number | null;
+  published: string | null;
   downloaded: string | null;
   name: string | null;
   tags: TagReference[];
@@ -40,6 +41,11 @@ export interface DownloadsListResponse {
 }
 
 export interface DownloadMutationResponse {
+  download: DownloadRecord;
+  message: string;
+}
+
+export interface DownloadUpdateResponse {
   download: DownloadRecord;
   message: string;
 }

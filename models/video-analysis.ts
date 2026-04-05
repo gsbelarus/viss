@@ -21,6 +21,10 @@ const videoAnalysisSchema = new Schema(
       default: null,
       trim: true,
     },
+    verified: {
+      type: Boolean,
+      default: false,
+    },
     filePath: {
       type: String,
       required: true,

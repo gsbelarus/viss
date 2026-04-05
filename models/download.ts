@@ -8,6 +8,7 @@ export interface DownloadDocument {
   url: string;
   fileName: string | null;
   size: number | null;
+  published: Date | null;
   downloaded: Date | null;
   name: string | null;
   tags: Types.ObjectId[];
@@ -45,6 +46,10 @@ const downloadSchema = new Schema<DownloadDocument>(
       type: Number,
       default: null,
       min: 0,
+    },
+    published: {
+      type: Date,
+      default: null,
     },
     downloaded: {
       type: Date,

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   type SVGProps,
   useCallback,
@@ -10,16 +11,20 @@ import {
   useTransition,
 } from "react";
 
+import { dispatchActiveProcessesRefresh } from "@/lib/active-process-events";
+import { formatLocalizedDateTime, getPreferredLocale } from "@/lib/date-time";
 import type {
   DownloadDeleteResponse,
   DownloadMetadataResponse,
   DownloadMutationResponse,
   DownloadRecord,
   DownloadStatus,
+  DownloadUpdateResponse,
   DownloadsListResponse,
 } from "@/lib/downloads-shared";
 import type {
   DownloadAnalysisStatus,
+  StartVideoAnalysisConflictResponse,
   StartVideoAnalysisResponse,
 } from "@/lib/video-analysis-shared";
 
@@ -31,10 +36,21 @@ interface ToastMessage {
   message: string;
 }
 
+interface DeleteConfirmationState {
+  ids: string[];
+  title: string;
+  message: string;
+}
+
 const EMPTY_FORM = {
   url: "",
   name: "",
   tags: "",
+};
+
+const EMPTY_DETAIL_FORM = {
+  tags: "",
+  published: "",
 };
 
 function formatBytes(value: number | null) {
@@ -59,14 +75,38 @@ function formatBytes(value: number | null) {
 }
 
 function formatDateTime(value: string | null) {
+  return formatLocalizedDateTime(
+    value,
+    typeof navigator === "undefined"
+      ? undefined
+      : getPreferredLocale(navigator.languages) ?? navigator.language
+  );
+}
+
+function formatDateTimeInput(value: string | null) {
   if (!value) {
-    return "-";
+    return "";
   }
 
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  const pad = (part: number) => String(part).padStart(2, "0");
+
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+  ].join("T");
+}
+
+function buildDetailForm(download: DownloadRecord) {
+  return {
+    tags: download.tags.map((tag) => tag.name).join(", "),
+    published: formatDateTimeInput(download.published),
+  };
 }
 
 function parseTagInput(value: string) {
@@ -101,6 +141,31 @@ function getStatusBadge(status: DownloadStatus) {
     default:
       return "bg-stone-200 text-stone-700";
   }
+}
+
+function getAnalysisStatusBadge(status: DownloadAnalysisStatus) {
+  switch (status) {
+    case "completed":
+      return "bg-emerald-100 text-emerald-800";
+    case "partial":
+      return "bg-amber-100 text-amber-800";
+    case "failed":
+      return "bg-rose-100 text-rose-800";
+    case "queued":
+      return "bg-amber-100 text-amber-800";
+    case "analyzing":
+      return "bg-sky-100 text-sky-800";
+    default:
+      return "bg-stone-200 text-stone-700";
+  }
+}
+
+function hasSavedAnalysis(download: DownloadRecord) {
+  return download.analysisStatus === "completed" || download.analysisStatus === "partial";
+}
+
+function hasAnalysisPage(download: DownloadRecord) {
+  return ["completed", "partial", "failed"].includes(download.analysisStatus);
 }
 
 function DownloadIcon(props: SVGProps<SVGSVGElement>) {
@@ -145,6 +210,35 @@ function AnalyzeIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function ViewIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M2.8 12s3.4-6.2 9.2-6.2 9.2 6.2 9.2 6.2-3.4 6.2-9.2 6.2S2.8 12 2.8 12Z" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="2.8" />
+    </svg>
+  );
+}
+
+function AnalysisLinkIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M7 4.5h7.5L19 9v10.5a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1Z" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14.5 4.5V9H19" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 12h6" strokeLinecap="round" />
+      <path d="M9 15.5h6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CloseIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M6 6 18 18" strokeLinecap="round" />
+      <path d="M18 6 6 18" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 interface DownloadStateSnapshot {
   downloadStatus: DownloadStatus;
   analysisStatus: DownloadAnalysisStatus;
@@ -166,6 +260,16 @@ function getAnalyzeButtonTone(download: DownloadRecord) {
   }
 }
 
+function hasPendingDownloadWork(downloads: DownloadRecord[]) {
+  return downloads.some(
+    (download) =>
+      download.status === "queued" ||
+      download.status === "downloading" ||
+      download.analysisStatus === "queued" ||
+      download.analysisStatus === "analyzing"
+  );
+}
+
 export default function DownloadsPage() {
   const [downloads, setDownloads] = useState<DownloadRecord[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -173,12 +277,20 @@ export default function DownloadsPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [previewDownload, setPreviewDownload] = useState<DownloadRecord | null>(null);
+  const [detailDownloadId, setDetailDownloadId] = useState<string | null>(null);
+  const [detailForm, setDetailForm] = useState(EMPTY_DETAIL_FORM);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] =
+    useState<DeleteConfirmationState | null>(null);
+  const [analysisOverwriteId, setAnalysisOverwriteId] = useState<string | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [isMetadataLoading, setIsMetadataLoading] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [hasActiveWork, setHasActiveWork] = useState(false);
   const [isSubmitting, startSubmitting] = useTransition();
+  const [isSavingDetail, startSavingDetail] = useTransition();
   const [isDeleting, startDeleting] = useTransition();
   const [isAnalyzing, startAnalyzing] = useTransition();
   const previousStatusesRef = useRef<Record<string, DownloadStateSnapshot>>({});
@@ -191,6 +303,14 @@ export default function DownloadsPage() {
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const allSelected =
     downloads.length > 0 && downloads.every((download) => selectedIdSet.has(download.id));
+  const detailDownload = useMemo(
+    () => downloads.find((download) => download.id === detailDownloadId) ?? null,
+    [detailDownloadId, downloads]
+  );
+  const analysisOverwriteDownload = useMemo(
+    () => downloads.find((download) => download.id === analysisOverwriteId) ?? null,
+    [analysisOverwriteId, downloads]
+  );
 
   const isPlayable = useCallback(
     (download: DownloadRecord) =>
@@ -218,6 +338,17 @@ export default function DownloadsPage() {
     window.setTimeout(() => {
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 4200);
+  }, []);
+
+  const syncDownload = useCallback((nextDownload: DownloadRecord) => {
+    setDownloads((current) =>
+      current.map((download) =>
+        download.id === nextDownload.id ? nextDownload : download
+      )
+    );
+    setPreviewDownload((current) =>
+      current?.id === nextDownload.id ? nextDownload : current
+    );
   }, []);
 
   const updateStatusTransitions = useCallback((nextDownloads: DownloadRecord[]) => {
@@ -307,9 +438,15 @@ export default function DownloadsPage() {
         throw new Error(payload.error || "Failed to load downloads.");
       }
 
-      setDownloads(payload.downloads);
+      setHasActiveWork(hasPendingDownloadWork(payload.downloads));
+
+      const completedDownloads = payload.downloads.filter(
+        (download) => download.status === "completed"
+      );
+
+      setDownloads(completedDownloads);
       setSelectedIds((current) =>
-        current.filter((id) => payload.downloads.some((download) => download.id === id))
+        current.filter((id) => completedDownloads.some((download) => download.id === id))
       );
       updateStatusTransitions(payload.downloads);
     } catch (error) {
@@ -370,16 +507,49 @@ export default function DownloadsPage() {
   }, []);
 
   useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+
+      void loadDownloads(false);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void loadDownloads(false);
+      }
+    };
+
     void loadDownloads(true);
 
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("pageshow", refreshWhenVisible);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("pageshow", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [loadDownloads]);
+
+  useEffect(() => {
+    if (!hasActiveWork) {
+      return;
+    }
+
     const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+
       void loadDownloads(false);
     }, 2500);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, [loadDownloads]);
+  }, [hasActiveWork, loadDownloads]);
 
   function resetModalState() {
     setForm(EMPTY_FORM);
@@ -407,6 +577,30 @@ export default function DownloadsPage() {
 
   function closePreview() {
     setPreviewDownload(null);
+  }
+
+  function openDetails(download: DownloadRecord) {
+    setDetailDownloadId(download.id);
+    setDetailForm(buildDetailForm(download));
+    setDetailError(null);
+  }
+
+  function closeDetails() {
+    if (isSavingDetail) {
+      return;
+    }
+
+    setDetailDownloadId(null);
+    setDetailForm(EMPTY_DETAIL_FORM);
+    setDetailError(null);
+  }
+
+  function closeDeleteConfirmation() {
+    if (isDeleting) {
+      return;
+    }
+
+    setDeleteConfirmation(null);
   }
 
   function openPreview(download: DownloadRecord) {
@@ -461,6 +655,8 @@ export default function DownloadsPage() {
         setIsModalOpen(false);
         resetModalState();
         pushToast("info", payload.message || "Download started.");
+        setHasActiveWork(true);
+        dispatchActiveProcessesRefresh();
         await loadDownloads(false);
       } catch (error) {
         setFormError(getRequestError(error, "Failed to queue the download."));
@@ -473,17 +669,17 @@ export default function DownloadsPage() {
       return;
     }
 
-    const confirmed = window.confirm(
-      selectedIds.length === 1
-        ? "Delete the selected download?"
-        : `Delete ${selectedIds.length} selected downloads?`
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    void deleteDownloadsByIds(selectedIds);
+    setDeleteConfirmation({
+      ids: [...selectedIds],
+      title:
+        selectedIds.length === 1
+          ? "Delete selected download?"
+          : `Delete ${selectedIds.length} selected downloads?`,
+      message:
+        selectedIds.length === 1
+          ? "This removes the download record, local file, and any related analysis artifacts."
+          : `This removes ${selectedIds.length} download records, local files, and any related analysis artifacts.`,
+    });
   }
 
   async function deleteDownloadsByIds(ids: string[]) {
@@ -509,6 +705,18 @@ export default function DownloadsPage() {
         setPreviewDownload(null);
       }
 
+      if (detailDownloadId && ids.includes(detailDownloadId)) {
+        setDetailDownloadId(null);
+        setDetailForm(EMPTY_DETAIL_FORM);
+        setDetailError(null);
+      }
+
+      if (analysisOverwriteId && ids.includes(analysisOverwriteId)) {
+        setAnalysisOverwriteId(null);
+      }
+
+      setDeleteConfirmation(null);
+
       pushToast("success", payload.message);
       await loadDownloads(false);
     } catch (error) {
@@ -520,21 +728,31 @@ export default function DownloadsPage() {
   }
 
   function handleRowDelete(download: DownloadRecord) {
-    const confirmed = window.confirm(
-      `Delete ${download.name || "this download"}?`
-    );
+    setDeleteConfirmation({
+      ids: [download.id],
+      title: `Delete ${download.name || "this download"}?`,
+      message:
+        "This removes the download record, local file, and any related analysis artifacts.",
+    });
+  }
 
-    if (!confirmed) {
+  function handleConfirmDelete() {
+    if (!deleteConfirmation) {
       return;
     }
 
     startDeleting(async () => {
-      await deleteDownloadsByIds([download.id]);
+      await deleteDownloadsByIds(deleteConfirmation.ids);
     });
   }
 
-  function handleAnalyze(download: DownloadRecord) {
+  function handleAnalyze(download: DownloadRecord, overwrite = false) {
     if (!isAnalyzable(download)) {
+      return;
+    }
+
+    if (!overwrite && hasSavedAnalysis(download)) {
+      setAnalysisOverwriteId(download.id);
       return;
     }
 
@@ -545,17 +763,35 @@ export default function DownloadsPage() {
           headers: {
             "content-type": "application/json",
           },
-          body: JSON.stringify({ id: download.id }),
+          body: JSON.stringify({
+            id: download.id,
+            overwrite,
+          }),
         });
-        const payload = (await response.json()) as StartVideoAnalysisResponse & {
-          error?: string;
-        };
+        const payload = (await response.json()) as
+          | StartVideoAnalysisResponse
+          | (StartVideoAnalysisConflictResponse & {
+            requiresOverwrite?: true;
+          });
 
         if (!response.ok) {
-          throw new Error(payload.error || "Failed to start video analysis.");
+          if ("requiresOverwrite" in payload && payload.requiresOverwrite) {
+            setAnalysisOverwriteId(download.id);
+            return;
+          }
+
+          throw new Error(
+            "error" in payload ? payload.error : "Failed to start video analysis."
+          );
         }
 
-        pushToast("info", payload.message || "Video analysis started.");
+        setAnalysisOverwriteId(null);
+        pushToast(
+          "info",
+          "message" in payload ? payload.message : "Video analysis started."
+        );
+        setHasActiveWork(true);
+        dispatchActiveProcessesRefresh();
         await loadDownloads(false);
       } catch (error) {
         pushToast(
@@ -566,10 +802,64 @@ export default function DownloadsPage() {
     });
   }
 
+  function handleConfirmOverwriteAnalysis() {
+    if (!analysisOverwriteDownload) {
+      return;
+    }
+
+    setAnalysisOverwriteId(null);
+    handleAnalyze(analysisOverwriteDownload, true);
+  }
+
+  function handleDetailSave() {
+    if (!detailDownload) {
+      return;
+    }
+
+    setDetailError(null);
+
+    startSavingDetail(async () => {
+      try {
+        const published = detailForm.published.trim()
+          ? new Date(detailForm.published)
+          : null;
+
+        if (published && Number.isNaN(published.getTime())) {
+          throw new Error("Published timestamp is invalid.");
+        }
+
+        const response = await fetch(`/api/downloads/${detailDownload.id}`, {
+          method: "PATCH",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            tags: parseTagInput(detailForm.tags),
+            published: published ? published.toISOString() : null,
+          }),
+        });
+        const payload = (await response.json()) as DownloadUpdateResponse & {
+          error?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.error || "Failed to update the download.");
+        }
+
+        syncDownload(payload.download);
+        setDetailForm(buildDetailForm(payload.download));
+        pushToast("success", payload.message || "Download updated.");
+        await loadDownloads(false);
+      } catch (error) {
+        setDetailError(getRequestError(error, "Failed to update the download."));
+      }
+    });
+  }
+
   return (
     <>
-      <div className="space-y-4">
-        <section className="border border-stone-900/8 bg-[rgba(255,252,247,0.92)] p-5 shadow-[0_12px_30px_rgba(28,25,23,0.05)] sm:p-6">
+      <div className="flex h-full min-h-0 flex-col gap-4">
+        <section className="shrink-0 border border-stone-900/8 bg-[rgba(255,252,247,0.92)] p-5 shadow-[0_12px_30px_rgba(28,25,23,0.05)] sm:p-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
@@ -603,22 +893,26 @@ export default function DownloadsPage() {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-stone-900/8 pt-4 text-[0.78rem] text-stone-500">
-            <span>{downloads.length} registered downloads</span>
+            <span>{downloads.length} downloaded videos</span>
             <span>YouTube is the only supported provider at the moment.</span>
           </div>
         </section>
 
-        <section className="border border-stone-900/8 bg-[rgba(255,252,247,0.92)] shadow-[0_12px_30px_rgba(28,25,23,0.05)]">
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-stone-900/8 bg-[rgba(255,252,247,0.92)] shadow-[0_12px_30px_rgba(28,25,23,0.05)]">
           {isLoading ? (
-            <div className="px-5 py-8 text-sm text-stone-500">Loading downloads...</div>
+            <div className="flex flex-1 items-center px-5 py-8 text-sm text-stone-500">
+              Loading downloads...
+            </div>
           ) : loadError ? (
-            <div className="px-5 py-8 text-sm text-rose-700">{loadError}</div>
+            <div className="flex flex-1 items-center px-5 py-8 text-sm text-rose-700">
+              {loadError}
+            </div>
           ) : downloads.length === 0 ? (
-            <div className="px-5 py-8 text-sm text-stone-500">
-              No downloads have been registered yet.
+            <div className="flex flex-1 items-center px-5 py-8 text-sm text-stone-500">
+              No downloaded videos yet.
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="min-h-0 flex-1 overflow-auto">
               <table className="min-w-full border-collapse text-left">
                 <thead>
                   <tr className="border-b border-stone-900/8 bg-stone-950/[0.02]">
@@ -646,10 +940,10 @@ export default function DownloadsPage() {
                       Size
                     </th>
                     <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Downloaded
+                      Published
                     </th>
                     <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Status
+                      Downloaded
                     </th>
                     <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
                       Actions
@@ -659,7 +953,7 @@ export default function DownloadsPage() {
                 <tbody>
                   {downloads.map((download) => (
                     <tr key={download.id} className="border-b border-stone-900/8 last:border-b-0">
-                      <td className="px-4 py-3 align-top">
+                      <td className="px-4 py-3 align-middle">
                         <input
                           type="checkbox"
                           checked={selectedIdSet.has(download.id)}
@@ -667,26 +961,30 @@ export default function DownloadsPage() {
                           aria-label={`Select ${download.name || download.url}`}
                         />
                       </td>
-                      <td className="px-4 py-3 align-top text-sm text-stone-600">
+                      <td className="px-4 py-3 align-middle text-sm text-stone-600">
                         {download.provider}
                       </td>
-                      <td className="px-4 py-3 align-top">
+                      <td className="px-4 py-3 align-middle">
                         <div className="text-sm font-medium text-stone-950">
                           {download.name || "Untitled video"}
                         </div>
-                        <div className="mt-1 text-[0.76rem] text-stone-500">
-                          {download.fileName || "File name will be assigned on download."}
-                        </div>
                       </td>
-                      <td className="px-4 py-3 align-top text-sm text-stone-600">
-                        <div className="max-w-sm truncate">{download.url}</div>
+                      <td className="px-4 py-3 align-middle text-sm text-stone-600">
+                        <a
+                          href={download.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="block max-w-sm truncate text-emerald-900 underline decoration-stone-300 underline-offset-2 transition hover:text-emerald-700"
+                        >
+                          {download.url}
+                        </a>
                         {download.errorMessage ? (
                           <div className="mt-1 text-[0.76rem] text-rose-700">
                             {download.errorMessage}
                           </div>
                         ) : null}
                       </td>
-                      <td className="px-4 py-3 align-top">
+                      <td className="px-4 py-3 align-middle">
                         <div className="flex max-w-xs flex-wrap gap-1.5">
                           {download.tags.length > 0 ? (
                             download.tags.map((tag) => (
@@ -702,23 +1000,28 @@ export default function DownloadsPage() {
                           )}
                         </div>
                       </td>
-                      <td className="px-4 py-3 align-top text-sm text-stone-600">
+                      <td className="px-4 py-3 align-middle text-sm text-stone-600">
                         {download.status === "downloading" || download.status === "queued"
                           ? `${formatBytes(download.bytesReceived)}${download.expectedSize ? ` / ${formatBytes(download.expectedSize)}` : ""}`
                           : formatBytes(download.size)}
                       </td>
-                      <td className="px-4 py-3 align-top text-sm text-stone-600">
+                      <td className="px-4 py-3 align-middle text-sm text-stone-600">
+                        {formatDateTime(download.published)}
+                      </td>
+                      <td className="px-4 py-3 align-middle text-sm text-stone-600">
                         {formatDateTime(download.downloaded)}
                       </td>
-                      <td className="px-4 py-3 align-top">
-                        <span
-                          className={`inline-flex px-2 py-1 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${getStatusBadge(download.status)}`}
-                        >
-                          {download.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 align-top">
+                      <td className="px-4 py-3 align-middle">
                         <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openDetails(download)}
+                            aria-label={`View details for ${download.name || "download"}`}
+                            title="View details"
+                            className="inline-flex size-8 items-center justify-center border border-stone-900/10 bg-white text-stone-700 transition hover:border-stone-900/20 hover:bg-stone-50"
+                          >
+                            <ViewIcon className="size-4" aria-hidden="true" />
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleAnalyze(download)}
@@ -735,6 +1038,26 @@ export default function DownloadsPage() {
                           >
                             <AnalyzeIcon className="size-4" aria-hidden="true" />
                           </button>
+                          {hasAnalysisPage(download) ? (
+                            <Link
+                              href={`/analysis/${download.id}`}
+                              aria-label={`Go to analysis for ${download.name || "download"}`}
+                              title="Go to analysis"
+                              className="inline-flex size-8 items-center justify-center border border-stone-900/10 bg-white text-stone-700 transition hover:border-stone-900/20 hover:bg-stone-50"
+                            >
+                              <AnalysisLinkIcon className="size-4" aria-hidden="true" />
+                            </Link>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled
+                              aria-label={`No analysis available for ${download.name || "download"}`}
+                              title="No analysis available"
+                              className="inline-flex size-8 items-center justify-center border border-stone-900/10 bg-white text-stone-400 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <AnalysisLinkIcon className="size-4" aria-hidden="true" />
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => openPreview(download)}
@@ -892,6 +1215,278 @@ export default function DownloadsPage() {
                 className="max-h-[72vh] w-full bg-black"
                 src={`/api/downloads/${previewDownload.id}/file`}
               />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {detailDownload ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/65 p-4">
+          <div className="w-full max-w-5xl border border-stone-900/10 bg-[rgba(255,252,247,0.98)] shadow-[0_24px_60px_rgba(28,25,23,0.24)]">
+            <div className="flex items-start justify-between gap-4 border-b border-stone-900/8 px-5 py-4">
+              <div>
+                <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
+                  Video details
+                </p>
+                <h2 className="mt-2 text-lg font-semibold text-stone-950">
+                  {detailDownload.name || "Untitled video"}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={closeDetails}
+                aria-label="Close details"
+                title="Close"
+                className="inline-flex size-9 items-center justify-center border border-stone-900/10 bg-white text-stone-700 transition hover:bg-stone-50"
+              >
+                <CloseIcon className="size-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="grid gap-6 px-5 py-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(18rem,0.8fr)]">
+              <section>
+                <dl className="grid gap-y-3 text-sm text-stone-700 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-x-4">
+                  <dt className="font-medium text-stone-500">Provider</dt>
+                  <dd>{detailDownload.provider}</dd>
+
+                  <dt className="font-medium text-stone-500">Source URL</dt>
+                  <dd>
+                    <a
+                      href={detailDownload.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="break-all text-emerald-900 underline decoration-stone-300 underline-offset-2 transition hover:text-emerald-700"
+                    >
+                      {detailDownload.url}
+                    </a>
+                  </dd>
+
+                  <dt className="font-medium text-stone-500">File</dt>
+                  <dd>{detailDownload.fileName || "-"}</dd>
+
+                  <dt className="font-medium text-stone-500">Size</dt>
+                  <dd>{formatBytes(detailDownload.size)}</dd>
+
+                  <dt className="font-medium text-stone-500">Download status</dt>
+                  <dd>
+                    <span
+                      className={`inline-flex items-center justify-center px-2 py-1 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${getStatusBadge(detailDownload.status)}`}
+                    >
+                      {detailDownload.status}
+                    </span>
+                  </dd>
+
+                  <dt className="font-medium text-stone-500">Analysis</dt>
+                  <dd className="space-y-1">
+                    <span
+                      className={`inline-flex items-center justify-center px-2 py-1 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${getAnalysisStatusBadge(detailDownload.analysisStatus)}`}
+                    >
+                      {detailDownload.analysisStatus}
+                    </span>
+                    <div className="text-stone-500">
+                      {detailDownload.analysisStage || "No analysis stage available."}
+                    </div>
+                  </dd>
+
+                  <dt className="font-medium text-stone-500">Published</dt>
+                  <dd>{formatDateTime(detailDownload.published)}</dd>
+
+                  <dt className="font-medium text-stone-500">Downloaded</dt>
+                  <dd>{formatDateTime(detailDownload.downloaded)}</dd>
+
+                  <dt className="font-medium text-stone-500">Analyzed</dt>
+                  <dd>{formatDateTime(detailDownload.analyzed)}</dd>
+
+                  <dt className="font-medium text-stone-500">Created</dt>
+                  <dd>{formatDateTime(detailDownload.createdAt)}</dd>
+
+                  <dt className="font-medium text-stone-500">Updated</dt>
+                  <dd>{formatDateTime(detailDownload.updatedAt)}</dd>
+                </dl>
+
+                {detailDownload.errorMessage ? (
+                  <div className="mt-4 border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+                    {detailDownload.errorMessage}
+                  </div>
+                ) : null}
+
+                {detailDownload.analysisErrorMessage ? (
+                  <div className="mt-4 border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    {detailDownload.analysisErrorMessage}
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="space-y-4 border border-stone-900/8 bg-white/70 p-4">
+                <div>
+                  <h3 className="text-sm font-semibold uppercase tracking-[0.16em] text-stone-500">
+                    Editable fields
+                  </h3>
+                </div>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-stone-800">Tags</span>
+                  <input
+                    type="text"
+                    value={detailForm.tags}
+                    onChange={(event) => {
+                      setDetailForm((current) => ({
+                        ...current,
+                        tags: event.target.value,
+                      }));
+                      setDetailError(null);
+                    }}
+                    placeholder="tag-one, tag-two"
+                    className="w-full border border-stone-900/10 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-emerald-800"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-1.5 block text-sm font-medium text-stone-800">Published</span>
+                  <input
+                    type="datetime-local"
+                    value={detailForm.published}
+                    onChange={(event) => {
+                      setDetailForm((current) => ({
+                        ...current,
+                        published: event.target.value,
+                      }));
+                      setDetailError(null);
+                    }}
+                    className="w-full border border-stone-900/10 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-emerald-800"
+                  />
+                  <span className="mt-1.5 block text-[0.78rem] text-stone-500">
+                    Leave this empty to clear the stored published timestamp.
+                  </span>
+                </label>
+
+                {detailError ? (
+                  <div className="border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
+                    {detailError}
+                  </div>
+                ) : null}
+              </section>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-stone-900/8 px-5 py-4">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleAnalyze(detailDownload)}
+                  disabled={!isAnalyzable(detailDownload) || isAnalyzing}
+                  className={`inline-flex items-center gap-2 px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${getAnalyzeButtonTone(detailDownload)}`}
+                >
+                  <AnalyzeIcon className="size-4" aria-hidden="true" />
+                  {hasSavedAnalysis(detailDownload) ? "Re-run analysis" : "Analyze"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRowDelete(detailDownload)}
+                  disabled={isDeleting || isAnalysisActive(detailDownload)}
+                  className="inline-flex items-center gap-2 border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-800 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <DeleteIcon className="size-4" aria-hidden="true" />
+                  Delete
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={closeDetails}
+                  className="border border-stone-900/10 bg-white px-3 py-2 text-sm font-medium text-stone-700 transition hover:bg-stone-50"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDetailSave}
+                  disabled={isSavingDetail}
+                  className="border border-stone-900/10 bg-stone-950 px-3 py-2 text-sm font-medium text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isSavingDetail ? "Saving..." : "Save changes"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {analysisOverwriteDownload ? (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-stone-950/75 p-4">
+          <div className="w-full max-w-md border border-stone-900/10 bg-[rgba(255,252,247,0.98)] shadow-[0_24px_60px_rgba(28,25,23,0.24)]">
+            <div className="border-b border-stone-900/8 px-5 py-4">
+              <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-amber-800">
+                Confirm overwrite
+              </p>
+              <h2 className="mt-2 text-lg font-semibold text-stone-950">
+                Overwrite existing analysis?
+              </h2>
+            </div>
+
+            <div className="space-y-3 px-5 py-5 text-sm leading-6 text-stone-600">
+              <p>
+                {analysisOverwriteDownload.name || "This video"} already has saved analysis results.
+              </p>
+              <p>
+                Starting a new analysis will replace the existing analysis document and generated artifacts.
+              </p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-stone-900/8 px-5 py-4">
+              <button
+                type="button"
+                onClick={() => setAnalysisOverwriteId(null)}
+                className="border border-stone-900/10 bg-white px-3 py-2 text-sm font-medium text-stone-700 transition hover:bg-stone-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmOverwriteAnalysis}
+                disabled={isAnalyzing}
+                className="border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-900 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Overwrite analysis
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteConfirmation ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-stone-950/75 p-4">
+          <div className="w-full max-w-md border border-stone-900/10 bg-[rgba(255,252,247,0.98)] shadow-[0_24px_60px_rgba(28,25,23,0.24)]">
+            <div className="border-b border-stone-900/8 px-5 py-4">
+              <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-rose-800">
+                Confirm delete
+              </p>
+              <h2 className="mt-2 text-lg font-semibold text-stone-950">
+                {deleteConfirmation.title}
+              </h2>
+            </div>
+
+            <div className="space-y-3 px-5 py-5 text-sm leading-6 text-stone-600">
+              <p>{deleteConfirmation.message}</p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-stone-900/8 px-5 py-4">
+              <button
+                type="button"
+                onClick={closeDeleteConfirmation}
+                disabled={isDeleting}
+                className="border border-stone-900/10 bg-white px-3 py-2 text-sm font-medium text-stone-700 transition hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={isDeleting}
+                className="border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-900 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isDeleting ? "Deleting..." : "Delete"}
+              </button>
             </div>
           </div>
         </div>
