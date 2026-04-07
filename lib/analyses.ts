@@ -22,6 +22,8 @@ type StoredVideoAnalysis = VideoAnalysisDocument & {
   _id?: unknown;
 };
 
+type DownloadTagLike = Types.ObjectId | { name?: unknown };
+
 function normalizeVideoAnalysisId(value: string) {
   const videoId = toNonEmptyString(value);
 
@@ -52,6 +54,22 @@ function buildAnalysisFileName(
   return fileName || null;
 }
 
+function buildAnalysisTagNames(download: DownloadReferenceDocument | null) {
+  if (!download) {
+    return [] as string[];
+  }
+
+  return ((download.tags ?? []) as DownloadTagLike[])
+    .map((tag) => {
+      if (tag instanceof Types.ObjectId) {
+        return null;
+      }
+
+      return typeof tag.name === "string" ? tag.name.trim() : null;
+    })
+    .filter((tagName): tagName is string => Boolean(tagName));
+}
+
 function serializeAnalysisListRecord(
   analysis: StoredVideoAnalysis,
   download: DownloadReferenceDocument | null
@@ -63,6 +81,7 @@ function serializeAnalysisListRecord(
     verified: analysis.verified === true,
     name: buildAnalysisName(analysis, download),
     fileName: buildAnalysisFileName(analysis, download),
+    tagNames: buildAnalysisTagNames(download),
     published: download?.published?.toISOString() ?? null,
     platform: download?.provider ?? analysis.platform ?? null,
     sourceUrl: download?.url ?? analysis.sourceUrl ?? null,
@@ -70,6 +89,7 @@ function serializeAnalysisListRecord(
     contentCategory: analysis.analysis.contentCategory,
     summary: analysis.analysis.summary,
     durationSec: analysis.mediaMetadata.durationSec,
+    sizeBytes: download?.size ?? analysis.mediaMetadata.fileSizeBytes ?? null,
     analyzedAt: analysis.updatedAt?.toISOString() ?? null,
     createdAt: analysis.createdAt.toISOString(),
     updatedAt: analysis.updatedAt.toISOString(),
@@ -103,7 +123,9 @@ async function loadDownloadMap(downloadIds: string[]) {
 
   const downloads = await Download.find({
     _id: { $in: validDownloadIds.map((downloadId) => new Types.ObjectId(downloadId)) },
-  }).exec();
+  })
+    .populate("tags", "name")
+    .exec();
 
   return new Map(
     downloads.map((download) => [download._id.toString(), download as DownloadReferenceDocument])

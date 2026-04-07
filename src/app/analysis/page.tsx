@@ -2,8 +2,16 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type SVGProps, useCallback, useEffect, useState, useTransition } from "react";
+import {
+  type SVGProps,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useTransition,
+} from "react";
 
+import DownloadLauncher from "./download-launcher";
 import { formatLocalizedDateTime, getPreferredLocale } from "@/lib/date-time";
 import type {
   VideoAnalysisDeleteResponse,
@@ -11,13 +19,25 @@ import type {
   VideoAnalysesListResponse,
 } from "@/lib/video-analysis-shared";
 
-type ToastKind = "success" | "error";
+type ToastKind = "info" | "success" | "error";
+type AnalysisSortField = "video" | "duration" | "published" | "status";
+type SortDirection = "asc" | "desc";
+
+interface SortState {
+  field: AnalysisSortField;
+  direction: SortDirection;
+}
 
 interface ToastMessage {
   id: string;
   kind: ToastKind;
   message: string;
 }
+
+const textCollator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
 
 function formatDateTime(value: string | null) {
   return formatLocalizedDateTime(
@@ -40,6 +60,27 @@ function formatDuration(durationSec: number) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+function formatBytes(value: number | null) {
+  if (value === null || !Number.isFinite(value)) {
+    return "-";
+  }
+
+  if (value < 1024) {
+    return `${value} B`;
+  }
+
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${size.toFixed(size >= 100 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
 function getRequestError(error: unknown, fallbackMessage: string) {
   if (error instanceof Error && error.message.trim()) {
     return error.message.trim();
@@ -48,16 +89,99 @@ function getRequestError(error: unknown, fallbackMessage: string) {
   return fallbackMessage;
 }
 
-function summarizeCategory(analysis: VideoAnalysisListRecord) {
-  if (analysis.contentCategory?.trim()) {
-    return analysis.contentCategory.trim();
+function getCategoryText(analysis: VideoAnalysisListRecord) {
+  return analysis.contentCategory?.trim() || null;
+}
+
+function getTagText(analysis: VideoAnalysisListRecord) {
+  return analysis.tagNames.length > 0 ? analysis.tagNames.join(", ") : null;
+}
+
+function getVideoLabel(analysis: VideoAnalysisListRecord) {
+  return analysis.name || analysis.fileName || analysis.videoId;
+}
+
+function getPublishedTimestamp(analysis: VideoAnalysisListRecord) {
+  return analysis.published ? Date.parse(analysis.published) : Number.NEGATIVE_INFINITY;
+}
+
+function getReviewStatusLabel(analysis: VideoAnalysisListRecord) {
+  return analysis.verified ? "Verified" : "Needs review";
+}
+
+function getNextSortState(current: SortState | null, field: AnalysisSortField): SortState {
+  if (current?.field === field) {
+    return {
+      field,
+      direction: current.direction === "asc" ? "desc" : "asc",
+    };
   }
 
-  if (analysis.summary?.trim()) {
-    return analysis.summary.trim();
+  return {
+    field,
+    direction: "asc",
+  };
+}
+
+function getAriaSortValue(sortState: SortState | null, field: AnalysisSortField) {
+  if (sortState?.field !== field) {
+    return "none" as const;
   }
 
-  return "-";
+  return sortState.direction === "asc" ? "ascending" as const : "descending" as const;
+}
+
+function SortTriangleIcon({
+  direction,
+}: {
+  direction: SortDirection | null;
+}) {
+  if (!direction) {
+    return <span className="inline-block size-2 opacity-0" aria-hidden="true" />;
+  }
+
+  return direction === "asc" ? (
+    <svg
+      viewBox="0 0 10 10"
+      className="size-2 fill-current text-stone-600"
+      aria-hidden="true"
+    >
+      <path d="M5 2 8.2 7.5H1.8Z" />
+    </svg>
+  ) : (
+    <svg
+      viewBox="0 0 10 10"
+      className="size-2 fill-current text-stone-600"
+      aria-hidden="true"
+    >
+      <path d="M1.8 2.5h6.4L5 8Z" />
+    </svg>
+  );
+}
+
+function SortHeaderButton({
+  label,
+  field,
+  sortState,
+  onSort,
+}: {
+  label: string;
+  field: AnalysisSortField;
+  sortState: SortState | null;
+  onSort: (field: AnalysisSortField) => void;
+}) {
+  const sortDirection = sortState?.field === field ? sortState.direction : null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(field)}
+      className="flex w-full items-center gap-1.5 text-left"
+    >
+      <span>{label}</span>
+      <SortTriangleIcon direction={sortDirection} />
+    </button>
+  );
 }
 
 function renderReviewStatus(analysis: VideoAnalysisListRecord) {
@@ -111,6 +235,7 @@ export default function AnalysisPage() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [previewAnalysis, setPreviewAnalysis] = useState<VideoAnalysisListRecord | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [sortState, setSortState] = useState<SortState | null>(null);
   const [isDeleting, startDeleting] = useTransition();
 
   const pushToast = useCallback((kind: ToastKind, message: string) => {
@@ -151,6 +276,51 @@ export default function AnalysisPage() {
         setIsLoading(false);
       }
     }
+  }, []);
+
+  const sortedAnalyses = useMemo(() => {
+    if (!sortState) {
+      return analyses;
+    }
+
+    const directionMultiplier = sortState.direction === "asc" ? 1 : -1;
+    const sortedItems = [...analyses];
+
+    sortedItems.sort((left, right) => {
+      let result = 0;
+
+      switch (sortState.field) {
+        case "video":
+          result = textCollator.compare(getVideoLabel(left), getVideoLabel(right));
+          break;
+        case "duration":
+          result = left.durationSec - right.durationSec;
+          break;
+        case "published":
+          result = getPublishedTimestamp(left) - getPublishedTimestamp(right);
+          break;
+        case "status":
+          result = textCollator.compare(
+            getReviewStatusLabel(left),
+            getReviewStatusLabel(right)
+          );
+          break;
+        default:
+          result = 0;
+      }
+
+      if (result === 0) {
+        result = textCollator.compare(getVideoLabel(left), getVideoLabel(right));
+      }
+
+      return result * directionMultiplier;
+    });
+
+    return sortedItems;
+  }, [analyses, sortState]);
+
+  const handleSort = useCallback((field: AnalysisSortField) => {
+    setSortState((current) => getNextSortState(current, field));
   }, []);
 
   useEffect(() => {
@@ -238,13 +408,19 @@ export default function AnalysisPage() {
     <>
       <div className="flex h-full min-h-0 flex-col gap-4">
         <section className="shrink-0 border border-stone-900/8 bg-[rgba(255,252,247,0.92)] p-5 shadow-[0_12px_30px_rgba(28,25,23,0.05)] sm:p-6">
-          <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
-            Analysis Library
-          </p>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
-            Reviewed videos are listed here with their category, duration, and direct
-            access to inspection or playback.
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
+                Analysis Library
+              </p>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
+                Queue YouTube downloads here, then review completed analyses with direct
+                access to inspection or playback.
+              </p>
+            </div>
+
+            <DownloadLauncher onToast={pushToast} />
+          </div>
         </section>
 
         <section className="flex min-h-0 flex-1 flex-col overflow-hidden border border-stone-900/8 bg-[rgba(255,252,247,0.92)] shadow-[0_12px_30px_rgba(28,25,23,0.05)]">
@@ -258,67 +434,133 @@ export default function AnalysisPage() {
             </div>
           ) : analyses.length === 0 ? (
             <div className="flex flex-1 items-center px-5 py-8 text-sm text-stone-500">
-              No analyzed videos yet. Start an analysis from the Downloads page.
+              No analyzed videos yet. Queue a YouTube download above and analysis will start automatically.
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-auto">
               <table className="min-w-full border-collapse text-left">
                 <thead>
-                  <tr className="border-b border-stone-900/8 bg-stone-950/[0.02]">
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Video
+                  <tr className="border-b border-stone-900/8">
+                    <th
+                      aria-sort={getAriaSortValue(sortState, "video")}
+                      className="sticky top-0 z-10 bg-[rgba(255,252,247,0.98)] px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500"
+                    >
+                      <SortHeaderButton
+                        label="Video"
+                        field="video"
+                        sortState={sortState}
+                        onSort={handleSort}
+                      />
                     </th>
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Provider
+                    <th className="sticky top-0 z-10 bg-[rgba(255,252,247,0.98)] px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
+                      Category / Tags
                     </th>
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Category / Summary
+                    <th
+                      aria-sort={getAriaSortValue(sortState, "duration")}
+                      className="sticky top-0 z-10 bg-[rgba(255,252,247,0.98)] px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500"
+                    >
+                      <SortHeaderButton
+                        label="Duration"
+                        field="duration"
+                        sortState={sortState}
+                        onSort={handleSort}
+                      />
                     </th>
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Duration
+                    <th
+                      aria-sort={getAriaSortValue(sortState, "published")}
+                      className="sticky top-0 z-10 bg-[rgba(255,252,247,0.98)] px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500"
+                    >
+                      <SortHeaderButton
+                        label="Published / Analyzed"
+                        field="published"
+                        sortState={sortState}
+                        onSort={handleSort}
+                      />
                     </th>
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Published
+                    <th
+                      aria-sort={getAriaSortValue(sortState, "status")}
+                      className="sticky top-0 z-10 bg-[rgba(255,252,247,0.98)] px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500"
+                    >
+                      <SortHeaderButton
+                        label="Status"
+                        field="status"
+                        sortState={sortState}
+                        onSort={handleSort}
+                      />
                     </th>
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Status
-                    </th>
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
-                      Analyzed
-                    </th>
-                    <th className="px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
+                    <th className="sticky top-0 z-10 bg-[rgba(255,252,247,0.98)] px-4 py-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-stone-500">
                       Actions
                     </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {analyses.map((analysis) => {
+                  {sortedAnalyses.map((analysis) => {
                     const deleteDisabled = isDeleting && deletingId === analysis.id;
+                    const categoryText = getCategoryText(analysis);
+                    const tagText = getTagText(analysis);
+                    const primaryCategoryText = categoryText || "-";
 
                     return (
                       <tr key={analysis.id} className="border-b border-stone-900/8 last:border-b-0">
                         <td className="px-4 py-3 align-middle">
-                          <div className="text-sm font-medium text-stone-950">
-                            {analysis.name || analysis.fileName || analysis.videoId}
+                          <div className="max-w-md space-y-1.5">
+                            <div className="font-mono text-[0.7rem] uppercase tracking-[0.18em] text-stone-500">
+                              {analysis.platform || "-"}
+                            </div>
+                            <div className="text-sm font-medium text-stone-950">
+                              {analysis.name || analysis.fileName || analysis.videoId}
+                            </div>
+                            {analysis.sourceUrl ? (
+                              <a
+                                href={analysis.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="block truncate text-sm text-emerald-900 underline decoration-stone-300 underline-offset-2 transition hover:text-emerald-700"
+                                title={analysis.sourceUrl}
+                              >
+                                {analysis.sourceUrl}
+                              </a>
+                            ) : (
+                              <div className="text-sm text-stone-400">-</div>
+                            )}
                           </div>
                         </td>
                         <td className="px-4 py-3 align-middle text-sm text-stone-600">
-                          {analysis.platform || "-"}
+                          <div className="max-w-md space-y-1.5 break-words">
+                            <div className="font-medium text-stone-800">{primaryCategoryText}</div>
+                            {tagText ? (
+                              <div className="text-[0.82rem] text-stone-500">
+                                Tags: {tagText}
+                              </div>
+                            ) : null}
+                          </div>
                         </td>
                         <td className="px-4 py-3 align-middle text-sm text-stone-600">
-                          <div className="max-w-md break-words">{summarizeCategory(analysis)}</div>
+                          <div className="space-y-1">
+                            <div>{formatDuration(analysis.durationSec)}</div>
+                            <div className="text-[0.82rem] text-stone-500">
+                              {formatBytes(analysis.sizeBytes)}
+                            </div>
+                          </div>
                         </td>
                         <td className="px-4 py-3 align-middle text-sm text-stone-600">
-                          {formatDuration(analysis.durationSec)}
-                        </td>
-                        <td className="px-4 py-3 align-middle text-sm text-stone-600">
-                          {formatDateTime(analysis.published)}
+                          <div className="space-y-1.5">
+                            <div>
+                              <div className="text-[0.72rem] uppercase tracking-[0.16em] text-stone-400">
+                                Published
+                              </div>
+                              <div>{formatDateTime(analysis.published)}</div>
+                            </div>
+                            <div>
+                              <div className="text-[0.72rem] uppercase tracking-[0.16em] text-stone-400">
+                                Analyzed
+                              </div>
+                              <div>{formatDateTime(analysis.analyzedAt)}</div>
+                            </div>
+                          </div>
                         </td>
                         <td className="px-4 py-3 align-middle text-sm text-stone-600">
                           {renderReviewStatus(analysis)}
-                        </td>
-                        <td className="px-4 py-3 align-middle text-sm text-stone-600">
-                          {formatDateTime(analysis.analyzedAt)}
                         </td>
                         <td className="px-4 py-3 align-middle">
                           <div className="flex flex-wrap gap-2">
@@ -367,7 +609,7 @@ export default function AnalysisPage() {
           {toasts.map((toast) => (
             <div
               key={toast.id}
-              className={`border px-4 py-3 text-sm shadow-[0_12px_30px_rgba(28,25,23,0.12)] ${toast.kind === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : "border-rose-200 bg-rose-50 text-rose-900"}`}
+              className={`border px-4 py-3 text-sm shadow-[0_12px_30px_rgba(28,25,23,0.12)] ${toast.kind === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-900" : toast.kind === "info" ? "border-sky-200 bg-sky-50 text-sky-900" : "border-rose-200 bg-rose-50 text-rose-900"}`}
             >
               {toast.message}
             </div>

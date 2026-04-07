@@ -14,7 +14,10 @@ import type {
 import { createLogEntry } from "@/lib/logs";
 import { connectToDatabase } from "@/lib/mongodb";
 import type { ActiveProcessRecord } from "@/lib/processes-shared";
-import { deleteVideoAnalysisArtifacts } from "@/lib/video-analysis";
+import {
+  deleteVideoAnalysisArtifacts,
+  startQueuedVideoAnalysis,
+} from "@/lib/video-analysis";
 import {
   getYouTubeBasicInfo,
   getYouTubeDownloadResources,
@@ -449,6 +452,11 @@ async function runQueuedDownload(downloadId: string) {
     download.bytesReceived = fileStats.size;
     download.expectedSize = fileStats.size;
     download.errorMessage = null;
+    download.analysisStatus = "queued";
+    download.analysisProgressPercent = 0;
+    download.analysisStage = "Queued";
+    download.analysisErrorMessage = null;
+    download.analyzed = null;
     await download.save();
 
     await createLogEntry({
@@ -463,6 +471,50 @@ async function runQueuedDownload(downloadId: string) {
         size: fileStats.size,
       },
     });
+
+    try {
+      await startQueuedVideoAnalysis(
+        downloadId,
+        finalPath,
+        download.url,
+        download.provider
+      );
+    } catch (error) {
+      const errorMessage = getErrorMessage(
+        error,
+        "Automatic video analysis could not be started."
+      );
+      const analysisAlreadyRunning =
+        error instanceof ApiError && error.status === 409;
+
+      if (!analysisAlreadyRunning) {
+        await Download.findByIdAndUpdate(downloadId, {
+          $set: {
+            analysisStatus: "failed",
+            analysisProgressPercent: null,
+            analysisStage: "Analysis failed",
+            analysisErrorMessage: errorMessage,
+            analyzed: null,
+          },
+        })
+          .exec()
+          .catch(() => undefined);
+      }
+
+      await createLogEntry({
+        scope: "video_analysis",
+        level: analysisAlreadyRunning ? "info" : "error",
+        message: analysisAlreadyRunning
+          ? "Automatic video analysis was already queued."
+          : "Automatic video analysis could not be started.",
+        downloadId,
+        details: {
+          filePath: finalPath,
+          error: errorMessage,
+          automatic: true,
+        },
+      }).catch(() => undefined);
+    }
   } catch (error) {
     if (tempFilePath) {
       await rm(tempFilePath, { force: true }).catch(() => undefined);

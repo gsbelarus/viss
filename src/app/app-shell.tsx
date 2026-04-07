@@ -17,11 +17,6 @@ const navigationItems = [
     description: "Live workspace overview",
   },
   {
-    href: "/downloads",
-    label: "Downloads",
-    description: "Queued capture and storage",
-  },
-  {
     href: "/analysis",
     label: "Analysis",
     description: "Reviewed videos and findings",

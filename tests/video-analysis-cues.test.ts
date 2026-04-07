@@ -525,6 +525,189 @@ test("manual finger transformation cues surface a hand-illusion punchline", () =
   );
 });
 
+test("green-suit helper cues surface a staged post-production removal trick", () => {
+  const ocr: OcrRecord = {
+    status: "completed",
+    detected: true,
+    summaryText: "A secret you didn't know yet",
+    frames: [
+      {
+        timestampSec: 0.2,
+        framePath: "frame-001.jpg",
+        text: "A secret you didn't know yet",
+        confidence: 0.95,
+        boxes: [],
+      },
+    ],
+    error: null,
+  };
+
+  const frameAnalyses: FrameAnalysisRecord[] = [
+    {
+      timestampSec: 0.2,
+      sceneDescription: "A young man stands on a soccer field with a ball at his feet.",
+      subjects: ["young man"],
+      objects: ["soccer ball"],
+      actions: ["preparing to kick"],
+      environment: "outdoor soccer field",
+      cameraFraming: "medium full shot",
+      emotionalTone: "anticipatory",
+      facialExpression: "focused",
+      visualDevices: [],
+      visibleTextSummary: "A secret you didn't know yet",
+      storyRole: "hook",
+      observedFacts: ["The player stands near a soccer ball on the field."],
+      inferences: ["The clip is setting up a soccer trick."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 5.1,
+      sceneDescription:
+        "A person in a bright green full-body suit bends toward the soccer ball while another player watches.",
+      subjects: ["person in green full-body suit", "player"],
+      objects: ["soccer ball"],
+      actions: ["holding the soccer ball", "positioning the setup"],
+      environment: "outdoor soccer field",
+      cameraFraming: "medium full shot",
+      emotionalTone: "playful mystery",
+      facialExpression: "face covered by suit",
+      visualDevices: [],
+      visibleTextSummary: "A secret you didn't know yet",
+      storyRole: "setup",
+      observedFacts: ["The green-suit person is holding the soccer ball with both hands."],
+      inferences: ["The green suit may be intended for a visual effect or later removal."],
+      uncertainties: ["Whether post-production will erase the helper from the trick."],
+    },
+    {
+      timestampSec: 9.8,
+      sceneDescription:
+        "A man in a green bodysuit props another player's leg while staying close to the ball.",
+      subjects: ["man in green bodysuit", "player"],
+      objects: ["soccer ball"],
+      actions: ["holding another player's leg", "supporting the ball setup"],
+      environment: "outdoor soccer field",
+      cameraFraming: "medium shot",
+      emotionalTone: "playful setup",
+      facialExpression: "face concealed by suit",
+      visualDevices: [],
+      visibleTextSummary: "A secret you didn't know yet",
+      storyRole: "development",
+      observedFacts: ["The green-suit helper is physically propping the player into position."],
+      inferences: ["The bodysuit may be used for a camouflage or invisibility effect on video."],
+      uncertainties: [],
+    },
+  ];
+
+  const audioHeuristics: AudioHeuristicsRecord = {
+    status: "completed",
+    audioPresent: true,
+    speechPresentLikely: false,
+    musicPresentLikely: true,
+    musicPresenceConfidence: 0.73,
+    avgRmsEnergy: 0.04,
+    peakRmsEnergy: 0.12,
+    energyTimeline: [],
+    transitionSignals: [],
+    silenceRegions: [],
+    dynamicProfile: "moderate",
+    notes: [],
+    error: null,
+  };
+
+  const cues = buildSynthesisCueTimeline(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    cues.some(
+      (cue) =>
+        cue.interpretationHint?.includes("staged hidden-helper effect") &&
+        cue.interpretationHint.includes("post-production can remove them")
+    )
+  );
+
+  const hypotheses = buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    hypotheses.some(
+      (hypothesis) =>
+        hypothesis.includes("green-suit helper") &&
+        hypothesis.includes("post-production removes")
+    )
+  );
+});
+
+test("generic green-clothing setups do not trigger the hidden-helper removal hypothesis", () => {
+  const ocr: OcrRecord = {
+    status: "completed",
+    detected: false,
+    summaryText: null,
+    frames: [],
+    error: null,
+  };
+
+  const frameAnalyses: FrameAnalysisRecord[] = [
+    {
+      timestampSec: 1.1,
+      sceneDescription: "A player in a green jersey dribbles a soccer ball alone on a field.",
+      subjects: ["player in green jersey"],
+      objects: ["soccer ball"],
+      actions: ["dribbling"],
+      environment: "outdoor soccer field",
+      cameraFraming: "medium shot",
+      emotionalTone: "focused",
+      facialExpression: "neutral concentration",
+      visualDevices: [],
+      visibleTextSummary: null,
+      storyRole: "setup",
+      observedFacts: ["The player controls the ball by himself."],
+      inferences: ["This looks like a straightforward soccer-skill demo."],
+      uncertainties: [],
+    },
+    {
+      timestampSec: 2.4,
+      sceneDescription: "The same player in green clothing flicks the ball upward with his foot.",
+      subjects: ["player in green clothing"],
+      objects: ["soccer ball"],
+      actions: ["flicking the ball upward"],
+      environment: "outdoor soccer field",
+      cameraFraming: "medium shot",
+      emotionalTone: "confident",
+      facialExpression: "focused",
+      visualDevices: [],
+      visibleTextSummary: null,
+      storyRole: "development",
+      observedFacts: ["No helper or support person is visible."],
+      inferences: ["The action is an ordinary skill move, not an editing trick."],
+      uncertainties: [],
+    },
+  ];
+
+  const audioHeuristics: AudioHeuristicsRecord = {
+    status: "completed",
+    audioPresent: true,
+    speechPresentLikely: false,
+    musicPresentLikely: true,
+    musicPresenceConfidence: 0.7,
+    avgRmsEnergy: 0.03,
+    peakRmsEnergy: 0.08,
+    energyTimeline: [],
+    transitionSignals: [],
+    silenceRegions: [],
+    dynamicProfile: "moderate",
+    notes: [],
+    error: null,
+  };
+
+  const hypotheses = buildStoryHypotheses(ocr, frameAnalyses, audioHeuristics);
+
+  assert.ok(
+    hypotheses.every(
+      (hypothesis) =>
+        !hypothesis.includes("green-suit helper") &&
+        !hypothesis.includes("post-production removes")
+    )
+  );
+});
+
 test("generic hand posing does not trigger the hand-illusion hypothesis", () => {
   const ocr: OcrRecord = {
     status: "completed",

@@ -470,6 +470,59 @@ function buildManualTransformationCue(frameAnalyses: FrameAnalysisRecord[]) {
   } satisfies SynthesisCueInput;
 }
 
+function buildHiddenHelperRemovalCue(frameAnalyses: FrameAnalysisRecord[]) {
+  const orderedFrames = [...frameAnalyses].sort((left, right) => left.timestampSec - right.timestampSec);
+  const helperFrames = orderedFrames
+    .map((frame) => ({
+      frame,
+      text: buildFrameEvidenceText(frame),
+    }))
+    .filter(
+      ({ text }) =>
+        /(green (?:full[- ]body|full body|morph|bodysuit|body suit|suit|outfit)|full green (?:morph )?suit|bright green (?:full[- ]body )?suit|green-screen|greenscreen|chroma)/.test(
+          text
+        ) &&
+        /(person|man|figure|helper|assistant|bodysuit|morph suit|full-body suit)/.test(text)
+    );
+
+  if (helperFrames.length < 2) {
+    return null;
+  }
+
+  const ballInteractionFrames = helperFrames.filter(
+    ({ text }) =>
+      /(soccer ball|football|ball)/.test(text) &&
+      /(hold(?:ing)?|catch(?:ing)?|throw(?:ing)?|pass(?:ing)?|support(?:ing)?|reach(?:ing)?|prop(?:ping)?|lift(?:ing)?|position(?:ing)?|move(?:s|d|ing)?|control(?:ling)?)/.test(
+        text
+      )
+  );
+  const supportFrames = helperFrames.filter(({ text }) =>
+    /(holding another'?s leg|holding the lifted leg|support(?:ing)? .*leg|lifted leg|raised leg|other man's leg)/.test(
+      text
+    )
+  );
+  const effectFrames = helperFrames.filter(({ text }) =>
+    /(camouflage|invisib(?:le|ility)|green screen|greenscreen|chroma|visual effect|special effect|post[- ]production|composit|remove(?:d|s|ing)?|erase(?:d|s|ing)?|conceal identity|hide|hidden)/.test(
+      text
+    )
+  );
+
+  if (ballInteractionFrames.length < 2 || effectFrames.length === 0) {
+    return null;
+  }
+
+  return {
+    timestampSec: roundTo(helperFrames[0].frame.timestampSec, 3),
+    cueType: "visual_device" as const,
+    observation:
+      supportFrames.length > 0
+        ? "A full-body green-suit figure repeatedly handles the ball and even props another performer into position, while frame evidence also points to camouflage or invisibility-style intent."
+        : "A full-body green-suit figure repeatedly handles the ball, while frame evidence also points to camouflage or invisibility-style intent.",
+    interpretationHint:
+      "This points to a staged hidden-helper effect: the green-suit assistant is physically positioning or moving the ball so post-production can remove them and leave a clean-looking soccer trick.",
+  } satisfies SynthesisCueInput;
+}
+
 export function buildAudioTransitionSignals(
   windows: AudioHeuristicsRecord["energyTimeline"],
   silenceThreshold: number
@@ -628,6 +681,7 @@ export function buildSynthesisCueTimeline(
     buildAlignedAudioPivotCue(frameAnalyses, audioHeuristics),
     buildTextEscalationCue(ocr.frames, frameAnalyses),
     buildManualTransformationCue(frameAnalyses),
+    buildHiddenHelperRemovalCue(frameAnalyses),
     ...buildOcrTimelineCues(ocr.frames),
     ...buildFrameSignalCues(frameAnalyses),
     ...audioHeuristics.transitionSignals.map((signal) => ({
@@ -675,6 +729,7 @@ export function buildStoryHypotheses(
   const alignedAudioPivotCue = buildAlignedAudioPivotCue(frameAnalyses, audioHeuristics);
   const textEscalationCue = buildTextEscalationCue(ocr.frames, frameAnalyses);
   const manualTransformationCue = buildManualTransformationCue(frameAnalyses);
+  const hiddenHelperRemovalCue = buildHiddenHelperRemovalCue(frameAnalyses);
 
   if (phaseContrastCue?.interpretationHint?.includes("carefree childhood gives way to school life")) {
     hypotheses.push(
@@ -687,6 +742,12 @@ export function buildStoryHypotheses(
   if (manualTransformationCue?.interpretationHint) {
     hypotheses.push(
       "The clip centers on a manual finger illusion: one hand covers or slides over a finger, then the reveal makes it look like a different finger has appeared as the punchline."
+    );
+  }
+
+  if (hiddenHelperRemovalCue?.interpretationHint) {
+    hypotheses.push(
+      "The 'secret' is a staged editing trick: a green-suit helper physically moves or supports the ball setup, then post-production removes that helper to leave a clean-looking soccer trick."
     );
   }
 

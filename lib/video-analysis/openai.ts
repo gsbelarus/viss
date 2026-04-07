@@ -959,6 +959,8 @@ export async function synthesizeVideoWithOpenAI(
       "Pay special attention to contrast structures where later beats reinterpret earlier ones, such as before-versus-after, carefree-versus-burdened, innocence-versus-understanding, or setup-versus-payoff.",
       "When consecutive frames focus on hands or fingers and later frames reveal a changed finger or object state after concealment, treat that as the core trick or joke rather than as generic gesturing.",
       "If the visual action is a precise hand or finger illusion, do not flatten it into generic dancing, posing, cheer-team rivalry, or fashion/performance vibes based only on clothing or music.",
+      "When multiple frames show a person in a full green or chroma-style suit physically holding the ball or propping another performer into position, infer a staged helper-for-removal setup: the assistant is likely meant to be removed in post-production so the final trick looks clean or invisibly assisted.",
+      "Do not flatten repeated green-suit object handling into generic costume comedy, vague mystery, or unresolved bait when the same helper is visibly manipulating the setup across frames.",
       "When a late stage clearly contrasts with earlier leisure/play stages and moves into school, work, responsibility, or another burdened context, favor that contrast as the main reveal instead of flattening the video into a generic montage.",
       "When the evidence supports a transition from carefree play to school, responsibility, or loss of innocence, the mainIdea must explicitly name that transition.",
       "Use timed cue combinations across text, facial expressions, visual devices, and audio transitions to infer the intended meaning when multiple channels align.",

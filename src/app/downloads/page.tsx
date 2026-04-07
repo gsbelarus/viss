@@ -15,8 +15,6 @@ import { dispatchActiveProcessesRefresh } from "@/lib/active-process-events";
 import { formatLocalizedDateTime, getPreferredLocale } from "@/lib/date-time";
 import type {
   DownloadDeleteResponse,
-  DownloadMetadataResponse,
-  DownloadMutationResponse,
   DownloadRecord,
   DownloadStatus,
   DownloadUpdateResponse,
@@ -41,12 +39,6 @@ interface DeleteConfirmationState {
   title: string;
   message: string;
 }
-
-const EMPTY_FORM = {
-  url: "",
-  name: "",
-  tags: "",
-};
 
 const EMPTY_DETAIL_FORM = {
   tags: "",
@@ -168,16 +160,6 @@ function hasAnalysisPage(download: DownloadRecord) {
   return ["completed", "partial", "failed"].includes(download.analysisStatus);
 }
 
-function DownloadIcon(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
-      <path d="M12 3v11" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="m7 10 5 5 5-5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M5 19h14" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function PlayIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
@@ -275,7 +257,6 @@ export default function DownloadsPage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [isModalOpen, setIsModalOpen] = useState(false);
   const [previewDownload, setPreviewDownload] = useState<DownloadRecord | null>(null);
   const [detailDownloadId, setDetailDownloadId] = useState<string | null>(null);
   const [detailForm, setDetailForm] = useState(EMPTY_DETAIL_FORM);
@@ -283,22 +264,13 @@ export default function DownloadsPage() {
   const [deleteConfirmation, setDeleteConfirmation] =
     useState<DeleteConfirmationState | null>(null);
   const [analysisOverwriteId, setAnalysisOverwriteId] = useState<string | null>(null);
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [formError, setFormError] = useState<string | null>(null);
-  const [metadataError, setMetadataError] = useState<string | null>(null);
-  const [isMetadataLoading, setIsMetadataLoading] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [hasActiveWork, setHasActiveWork] = useState(false);
-  const [isSubmitting, startSubmitting] = useTransition();
   const [isSavingDetail, startSavingDetail] = useTransition();
   const [isDeleting, startDeleting] = useTransition();
   const [isAnalyzing, startAnalyzing] = useTransition();
   const previousStatusesRef = useRef<Record<string, DownloadStateSnapshot>>({});
   const hasLoadedOnceRef = useRef(false);
-  const fieldEditsRef = useRef({
-    name: false,
-    tags: false,
-  });
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const allSelected =
@@ -373,7 +345,9 @@ export default function DownloadsPage() {
         if (download.status === "completed") {
           pushToast(
             "success",
-            `${download.name || "Video"} downloaded successfully.`
+            download.analysisStatus === "queued" || download.analysisStatus === "analyzing"
+              ? `${download.name || "Video"} downloaded successfully. Analysis started automatically.`
+              : `${download.name || "Video"} downloaded successfully.`
           );
         }
 
@@ -460,52 +434,6 @@ export default function DownloadsPage() {
     }
   }, [updateStatusTransitions]);
 
-  const fetchMetadata = useCallback(async (url: string) => {
-    const trimmedUrl = url.trim();
-
-    if (!trimmedUrl) {
-      return;
-    }
-
-    setMetadataError(null);
-    setIsMetadataLoading(true);
-
-    try {
-      const response = await fetch("/api/downloads/metadata", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ url: trimmedUrl }),
-      });
-      const payload = (await response.json()) as DownloadMetadataResponse & {
-        error?: string;
-      };
-
-      if (!response.ok) {
-        throw new Error(payload.error || "Failed to fetch metadata.");
-      }
-
-      setForm((current) => ({
-        ...current,
-        name:
-          fieldEditsRef.current.name || current.name.trim()
-            ? current.name
-            : payload.name || "",
-        tags:
-          fieldEditsRef.current.tags || current.tags.trim()
-            ? current.tags
-            : payload.tags.join(", "),
-      }));
-    } catch (error) {
-      setMetadataError(
-        getRequestError(error, "Metadata could not be resolved for this URL.")
-      );
-    } finally {
-      setIsMetadataLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
     const refreshWhenVisible = () => {
       if (document.visibilityState !== "visible") {
@@ -550,30 +478,6 @@ export default function DownloadsPage() {
       window.clearInterval(timer);
     };
   }, [hasActiveWork, loadDownloads]);
-
-  function resetModalState() {
-    setForm(EMPTY_FORM);
-    setFormError(null);
-    setMetadataError(null);
-    fieldEditsRef.current = {
-      name: false,
-      tags: false,
-    };
-  }
-
-  function openModal() {
-    resetModalState();
-    setIsModalOpen(true);
-  }
-
-  function closeModal() {
-    if (isSubmitting) {
-      return;
-    }
-
-    setIsModalOpen(false);
-    resetModalState();
-  }
 
   function closePreview() {
     setPreviewDownload(null);
@@ -626,42 +530,6 @@ export default function DownloadsPage() {
     }
 
     setSelectedIds(downloads.map((download) => download.id));
-  }
-
-  function handleSubmit() {
-    setFormError(null);
-
-    startSubmitting(async () => {
-      try {
-        const response = await fetch("/api/downloads", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            url: form.url,
-            name: form.name,
-            tags: parseTagInput(form.tags),
-          }),
-        });
-        const payload = (await response.json()) as DownloadMutationResponse & {
-          error?: string;
-        };
-
-        if (!response.ok) {
-          throw new Error(payload.error || "Failed to queue the download.");
-        }
-
-        setIsModalOpen(false);
-        resetModalState();
-        pushToast("info", payload.message || "Download started.");
-        setHasActiveWork(true);
-        dispatchActiveProcessesRefresh();
-        await loadDownloads(false);
-      } catch (error) {
-        setFormError(getRequestError(error, "Failed to queue the download."));
-      }
-    });
   }
 
   function handleDelete() {
@@ -866,20 +734,12 @@ export default function DownloadsPage() {
                 Downloads
               </p>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
-                Register every YouTube download in the database, store the local
-                file on the backend, and track progress from the shared title bar.
+                Review completed downloads, edit metadata, play back files, and
+                re-run or inspect analysis results after processing finishes.
               </p>
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={openModal}
-                className="inline-flex items-center gap-2 border border-stone-900/10 bg-stone-950 px-3 py-2 text-sm font-medium text-white transition hover:bg-stone-800"
-              >
-                <DownloadIcon className="size-4" aria-hidden="true" />
-                Download
-              </button>
               <button
                 type="button"
                 onClick={handleDelete}
@@ -1088,101 +948,6 @@ export default function DownloadsPage() {
           )}
         </section>
       </div>
-
-      {isModalOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/45 p-4">
-          <div className="w-full max-w-xl border border-stone-900/10 bg-[rgba(255,252,247,0.98)] shadow-[0_24px_60px_rgba(28,25,23,0.2)]">
-            <div className="border-b border-stone-900/8 px-5 py-4">
-              <p className="font-mono text-[0.72rem] font-medium uppercase tracking-[0.22em] text-emerald-800">
-                Download
-              </p>
-              <h2 className="mt-2 text-lg font-semibold text-stone-950">
-                Queue a YouTube video download
-              </h2>
-            </div>
-
-            <div className="space-y-4 px-5 py-5">
-              <label className="block">
-                <span className="mb-1.5 block text-sm font-medium text-stone-800">URL</span>
-                <input
-                  type="url"
-                  value={form.url}
-                  onChange={(event) => {
-                    setForm((current) => ({ ...current, url: event.target.value }));
-                    setMetadataError(null);
-                    setFormError(null);
-                  }}
-                  onBlur={() => {
-                    void fetchMetadata(form.url);
-                  }}
-                  placeholder="https://www.youtube.com/watch?v=..."
-                  className="w-full border border-stone-900/10 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-emerald-800"
-                />
-              </label>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="block">
-                  <span className="mb-1.5 block text-sm font-medium text-stone-800">Name</span>
-                  <input
-                    type="text"
-                    value={form.name}
-                    onChange={(event) => {
-                      fieldEditsRef.current.name = true;
-                      setForm((current) => ({ ...current, name: event.target.value }));
-                    }}
-                    placeholder="Optional title override"
-                    className="w-full border border-stone-900/10 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-emerald-800"
-                  />
-                </label>
-
-                <label className="block">
-                  <span className="mb-1.5 block text-sm font-medium text-stone-800">Tags</span>
-                  <input
-                    type="text"
-                    value={form.tags}
-                    onChange={(event) => {
-                      fieldEditsRef.current.tags = true;
-                      setForm((current) => ({ ...current, tags: event.target.value }));
-                    }}
-                    placeholder="tag-one, tag-two"
-                    className="w-full border border-stone-900/10 bg-white px-3 py-2 text-sm text-stone-900 outline-none transition focus:border-emerald-800"
-                  />
-                </label>
-              </div>
-
-              <div className="space-y-2 text-[0.78rem] text-stone-500">
-                <p>
-                  Leave Name or Tags empty and the system will try to fill them from
-                  YouTube metadata. Any values you type stay as entered.
-                </p>
-                {isMetadataLoading ? (
-                  <p className="text-emerald-800">Resolving metadata...</p>
-                ) : null}
-                {metadataError ? <p className="text-rose-700">{metadataError}</p> : null}
-                {formError ? <p className="text-rose-700">{formError}</p> : null}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 border-t border-stone-900/8 px-5 py-4">
-              <button
-                type="button"
-                onClick={closeModal}
-                className="border border-stone-900/10 bg-white px-3 py-2 text-sm font-medium text-stone-700 transition hover:bg-stone-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSubmit}
-                disabled={!form.url.trim() || isSubmitting}
-                className="border border-stone-900/10 bg-stone-950 px-3 py-2 text-sm font-medium text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {isSubmitting ? "Starting..." : "Download"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {previewDownload ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/65 p-4">

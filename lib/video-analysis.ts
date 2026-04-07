@@ -2297,6 +2297,26 @@ export async function enqueueVideoAnalysis(
     analyzed: null,
   });
 
+  return startQueuedVideoAnalysis(
+    downloadId,
+    filePath,
+    download.url,
+    download.provider
+  );
+}
+
+export async function startQueuedVideoAnalysis(
+  downloadId: string,
+  filePath: string,
+  sourceUrl?: string | null,
+  platform?: string | null
+): Promise<StartVideoAnalysisResponse> {
+  await connectToDatabase();
+
+  if (analysisJobRegistry.has(downloadId)) {
+    throw new ApiError(409, "Video analysis is already running for this download.");
+  }
+
   await createLogEntry({
     scope: ANALYSIS_SCOPE,
     level: "info",
@@ -2304,12 +2324,17 @@ export async function enqueueVideoAnalysis(
     downloadId,
     details: {
       filePath,
-      sourceUrl: download.url,
-      platform: download.provider,
+      sourceUrl: sourceUrl ?? null,
+      platform: platform ?? null,
     },
   });
 
-  const job = processVideo(downloadId, filePath, download.url, download.provider)
+  const job = processVideo(
+    downloadId,
+    filePath,
+    sourceUrl ?? undefined,
+    platform ?? undefined
+  )
     .then(() => undefined)
     .catch(() => undefined)
     .finally(() => {

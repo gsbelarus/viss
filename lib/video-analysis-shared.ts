@@ -285,6 +285,7 @@ export interface VideoAnalysisListRecord {
   verified: boolean;
   name: string | null;
   fileName: string | null;
+  tagNames: string[];
   published: string | null;
   platform: string | null;
   sourceUrl: string | null;
@@ -292,6 +293,7 @@ export interface VideoAnalysisListRecord {
   contentCategory: string | null;
   summary: string | null;
   durationSec: number;
+  sizeBytes: number | null;
   analyzedAt: string | null;
   createdAt: string;
   updatedAt: string;
